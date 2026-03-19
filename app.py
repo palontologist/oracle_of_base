@@ -14,7 +14,7 @@ from social_prophet import SocialProphet
 app = Flask(__name__)
 
 # Initialize Oracles
-AGENT_ID = "13fc4b5f265242c9a91da155017226fd"
+AGENT_ID = "34499"
 PRIVATE_KEY = os.getenv("AGENT_PRIVATE_KEY")
 
 financial_oracle = FinancialProphet(AGENT_ID, PRIVATE_KEY)
