@@ -63,11 +63,10 @@ def submit_attestation(target_token_address):
         # We'll proceed anyway for now, but it might fail
     
     # Initialize Oracle
-    # Convert hex agent ID to int
-    agent_id_hex = "13fc4b5f265242c9a91da155017226fd"
-    agent_id_int = int(agent_id_hex, 16)
+    # CORRECT AGENT ID (Token ID from AgentProof)
+    agent_id_int = 34499
     
-    oracle = FinancialProphet(agent_id_hex, PRIVATE_KEY)
+    oracle = FinancialProphet(str(agent_id_int), PRIVATE_KEY)
     
     # Generate Prophecy
     print(f"🔮 Generating prophecy for {target_token_address}...")
