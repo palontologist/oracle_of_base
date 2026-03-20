@@ -42,7 +42,7 @@ class FinancialProphet:
 
     def consult_the_stars(self, token_address):
         """
-        Analyzes a token address using ONLY Venice AI (Qwen 2.5) to generate a safety score.
+        Analyzes a token address using ONLY Venice AI to generate a safety score.
         """
         print(f"🔮 Gazing into the void for token: {token_address}...")
         
@@ -106,12 +106,12 @@ class FinancialProphet:
             """
             
             payload = {
-                "model": "qwen3-5-9b", # Pure AI Reasoning
+                "model": "qwen-2.5-32b", # Using Qwen 2.5 32B (Best available Qwen on Venice)
                 "messages": [
                     {"role": "system", "content": "You are an intelligent quant oracle that outputs JSON."},
                     {"role": "user", "content": prompt}
                 ],
-                "temperature": 0.9
+                "temperature": 0.7
             }
             
             response = requests.post("https://api.venice.ai/api/v1/chat/completions", headers=headers, json=payload)
