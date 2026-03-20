@@ -386,20 +386,39 @@ def run_fallback_scan() -> list[dict]:
     """
     predictions = []
     try:
-        # Use the same multi-feed approach as fetch_new_base_pairs
-        pairs      = fetch_new_base_pairs()
-        now_ms     = time.time() * 1000
-        candidates = [
-            p for p in pairs
-            if (
-                float(p.get('liquidity', {}).get('usd', 0) or 0) >= MIN_LIQUIDITY_USD and
-                not any(kw in p.get('baseToken', {}).get('symbol', '').upper()
-                        for kw in ['USD', 'USDC', 'USDT', 'WETH', 'WBTC', 'DAI']) and
-                not already_predicted(p.get('baseToken', {}).get('address', ''))
-            )
-        ]
+        url = "https://api.dexscreener.com/latest/dex/pairs/base"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            pairs = json.loads(r.read().decode()).get('pairs') or []
 
-        log.info(f"Fallback scan: {len(candidates)} new candidates from {len(pairs)} resolved pairs")
+        now_ms = time.time() * 1000
+        candidates = []
+        for p in pairs:
+            symbol = p.get('baseToken', {}).get('symbol', '?')
+            addr = p.get('baseToken', {}).get('address', '')
+            
+            # 1. Check if already predicted
+            if already_predicted(addr):
+                continue
+                
+            # 2. Check Age (Relaxed to 24h for testing)
+            age_hours = (now_ms - p.get('pairCreatedAt', 0)) / (1000 * 3600)
+            if age_hours > 24: 
+                continue
+
+            # 3. Check Liquidity (Relaxed to $100 for testing)
+            liquidity = float(p.get('liquidity', {}).get('usd', 0) or 0)
+            if liquidity < 100:
+                log.info(f"Skipping {symbol}: Low liquidity (${liquidity:.0f})")
+                continue
+
+            # 4. Check Symbol (Stablecoins/WETH)
+            if any(kw in symbol.upper() for kw in ['USD', 'USDC', 'USDT', 'WETH', 'WBTC', 'DAI']):
+                continue
+
+            candidates.append(p)
+
+        log.info(f"Fallback scan: {len(candidates)} new candidates")
 
         for pair in candidates[:5]:
             if not can_predict():
