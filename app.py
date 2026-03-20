@@ -19,6 +19,7 @@ from social_prophet   import SocialProphet
 from trust_engine     import full_prophecy
 from prediction_store import save_prediction, get_reputation_stats
 from resolution_engine import run_resolution_cycle
+from watcher import run_watch_cycle
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("app")
@@ -229,6 +230,17 @@ def trust_check():
     })
 
 
+@app.route('/watch', methods=['GET', 'POST'])
+def trigger_watch():
+    """Manually trigger a watch cycle — scans DexScreener for new tokens now."""
+    from watcher import run_watch_cycle as _run_watch_cycle
+    results = _run_watch_cycle()
+    return jsonify({
+        "found":       len(results),
+        "predictions": results,
+    })
+
+
 @app.route('/resolve', methods=['GET', 'POST'])
 def trigger_resolution():
     """Manually trigger a resolution cycle — useful for testing."""
@@ -252,6 +264,11 @@ def health_check():
             "free":    ["/health", "/trust-check", "/reputation"],
             "$0.01":   ["/prophecy", "/social-prophecy"],
             "$0.05":   ["/combined-prophecy"],
+        },
+        "watcher": {
+            "interval_seconds": int(os.getenv("WATCH_INTERVAL_SECONDS", "600")),
+            "max_token_age_hours": float(os.getenv("MAX_TOKEN_AGE_HOURS", "2")),
+            "min_liquidity_usd": float(os.getenv("MIN_LIQUIDITY_USD", "1000")),
         }
     })
 
@@ -286,35 +303,37 @@ def start_resolution_scheduler():
 # Start at import time so gunicorn picks it up
 start_resolution_scheduler()
 
+
 # ── Background watcher ────────────────────────────────────────────────────────
- 
+
 _watcher_started = False
- 
+
 def start_watcher():
     global _watcher_started
     if _watcher_started:
         return
     _watcher_started = True
- 
+
     def _loop():
         import time as _time
+        from watcher import run_watch_cycle as _run_watch_cycle
         interval = int(os.getenv("WATCH_INTERVAL_SECONDS", "600"))
         log.info(f"Watcher thread started (interval={interval}s)")
         # Small initial delay so app finishes booting before first scan
         _time.sleep(30)
         while True:
             try:
-                results = run_watch_cycle()
+                results = _run_watch_cycle()
                 if results:
                     log.info(f"Watcher cycle: {len(results)} new predictions")
             except Exception as e:
                 log.error(f"Watcher error: {e}", exc_info=True)
             _time.sleep(interval)
- 
+
     t = threading.Thread(target=_loop, daemon=True, name="watcher")
     t.start()
     log.info("Watcher thread started.")
- 
+
 start_watcher()
 
 # ── x402 Payment Middleware ───────────────────────────────────────────────────
