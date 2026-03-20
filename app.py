@@ -1,7 +1,6 @@
 from flask import Flask, request, jsonify
 import os
 import sys
-from types import SimpleNamespace
 from dotenv import load_dotenv
 
 # x402 imports
@@ -30,8 +29,8 @@ social_oracle = SocialProphet(AGENT_ID, PRIVATE_KEY)
 # x402 Setup
 # FIX: HTTPFacilitatorClientSync expects a config object with a .url attribute,
 # not a raw string. We use SimpleNamespace as a lightweight config wrapper.
-_facilitator_config = SimpleNamespace(url="https://facilitator.x402.org")
-facilitator = HTTPFacilitatorClientSync(_facilitator_config)
+# FIX: HTTPFacilitatorClientSync accepts a plain dict with a "url" key
+facilitator = HTTPFacilitatorClientSync({"url": "https://facilitator.x402.org"})
 
 server = x402ResourceServerSync(facilitator_clients=[facilitator])
 server.register("eip155:8453", ExactEvmServerScheme())
@@ -94,8 +93,8 @@ def health_check():
     return jsonify({"status": "ok", "service": "Oracle of Base"})
 
 
-# Apply PaymentMiddleware AFTER all routes are registered
-app.wsgi_app = PaymentMiddleware(app.wsgi_app, server, routes)
+# PaymentMiddleware registers itself with the app internally — no assignment needed
+PaymentMiddleware(app, server, routes)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5001, debug=True)
