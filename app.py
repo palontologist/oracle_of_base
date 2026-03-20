@@ -29,8 +29,8 @@ social_oracle = SocialProphet(AGENT_ID, PRIVATE_KEY)
 
 # --- x402 Payment Setup (FIXED) ---
 # 1. Create Facilitator Client (Sync)
-# Use the HTTP implementation, not the Protocol interface
-facilitator = HTTPFacilitatorClientSync(url="https://facilitator.x402.org")
+# Use config dict for initialization
+facilitator = HTTPFacilitatorClientSync(config={"url": "https://facilitator.x402.org"})
 
 # 2. Create Server (Sync)
 # Pass the client object in a list
