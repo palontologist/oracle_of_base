@@ -32,7 +32,9 @@ load_dotenv()
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from prophecy_engine  import FinancialProphet
-from prediction_store import save_prediction, get_conn
+# FIX: Import engine instead of get_conn for SQLAlchemy
+from prediction_store import save_prediction, engine
+from sqlalchemy import text
 
 logging.basicConfig(
     level  = logging.INFO,
@@ -126,13 +128,13 @@ def record_prediction():
 
 def already_predicted(token_address: str) -> bool:
     try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT 1 FROM predictions WHERE subject = %s LIMIT 1",
-                    (token_address.lower(),)
-                )
-                return cur.fetchone() is not None
+        # FIX: Use SQLAlchemy engine connection
+        with engine.connect() as conn:
+            result = conn.execute(
+                text("SELECT 1 FROM predictions WHERE subject = :subject LIMIT 1"),
+                {"subject": token_address.lower()}
+            ).fetchone()
+            return result is not None
     except Exception as e:
         log.error(f"DB check error: {e}")
         return False
@@ -251,7 +253,7 @@ def handle_new_pair_event(event: dict, dex_name: str, token_arg: int):
             prediction_type     = "token",
             subject             = token_address.lower(),
             verdict             = verdict,
-            score               = fate.get('score', 0) // 100,
+            score               = fate.get('score', 0),
             raw_data            = fate,
             attestation_uid     = receipt.get('uid', ''),
             resolve_after_hours = RESOLVE_HOURS,
@@ -263,10 +265,7 @@ def handle_new_pair_event(event: dict, dex_name: str, token_arg: int):
             f"✅ AUTO-PREDICTED {symbol} | "
             f"id={prediction_id[:8]} | "
             f"verdict={verdict} | "
-            f"score={fate.get('score', 0) // 100} | "
-            f"token={fate.get('token_score')} "
-            f"deployer={fate.get('deployer_score')} "
-            f"promoter={fate.get('promoter_score')} | "
+            f"score={fate.get('score', 0)} | "
             f"dex={dex_name}"
         )
 
@@ -378,89 +377,60 @@ def listen_for_pairs():
 
 # ── Fallback: periodic DexScreener scan ──────────────────────────────────────
 
-def run_fallback_scan() -> list[dict]:
+def run_fallback_scan():
     """
     Fallback scan using DexScreener's latest pairs endpoint.
     Used when WebSocket is unavailable (no Alchemy key etc).
-    Runs every WATCH_INTERVAL_SECONDS.
+    Runs every 60 seconds.
     """
-    predictions = []
-    try:
-        url = "https://api.dexscreener.com/latest/dex/pairs/base"
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=15) as r:
-            pairs = json.loads(r.read().decode()).get('pairs') or []
+    log.info("Running fallback scan (DexScreener polling)...")
+    while True:
+        try:
+            url = "https://api.dexscreener.com/latest/dex/pairs/base"
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                data = json.loads(r.read().decode())
+                pairs = data.get('pairs') or []
 
-        now_ms = time.time() * 1000
-        candidates = [
-            p for p in pairs
-            if (
-                (now_ms - p.get('pairCreatedAt', 0)) / (1000 * 3600) < 2 and
-                float(p.get('liquidity', {}).get('usd', 0) or 0) >= MIN_LIQUIDITY_USD and
-                not any(kw in p.get('baseToken', {}).get('symbol', '').upper()
-                        for kw in ['USD', 'USDC', 'USDT', 'WETH', 'WBTC', 'DAI']) and
-                not already_predicted(p.get('baseToken', {}).get('address', ''))
-            )
-        ]
+            # Process pairs (simplified logic for fallback)
+            for p in pairs[:5]: # Check top 5 latest
+                addr = p.get('baseToken', {}).get('address')
+                if addr:
+                    if not already_predicted(addr) and can_predict():
+                        log.info(f"Fallback found new pair: {p.get('baseToken', {}).get('symbol')} ({addr})")
+                        
+                        # Run prophecy directly
+                        try:
+                            fate = oracle.consult_the_stars(addr)
+                            receipt = oracle.generate_attestation(addr, fate)
+                            
+                            raw_verdict = fate.get('verdict', 'UNKNOWN')
+                            verdict = raw_verdict.split(' ')[0] if ' ' in raw_verdict else raw_verdict
+                            
+                            pid = save_prediction(
+                                agent_id=AGENT_ID,
+                                prediction_type="token",
+                                subject=addr.lower(),
+                                verdict=verdict,
+                                score=fate.get('score', 0),
+                                raw_data=fate,
+                                attestation_uid=receipt.get('uid', ''),
+                                resolve_after_hours=RESOLVE_HOURS
+                            )
+                            record_prediction()
+                            log.info(f"✅ Fallback Predicted: {pid}")
+                        except Exception as e:
+                            log.error(f"Fallback prediction failed: {e}")
 
-        log.info(f"Fallback scan: {len(candidates)} new candidates")
-
-        for pair in candidates[:5]:
-            if not can_predict():
-                break
-
-            token_addr = pair.get('baseToken', {}).get('address', '')
-            fate       = oracle.consult_the_stars(token_addr)
-            receipt    = oracle.generate_attestation(token_addr, fate)
-
-            raw_verdict = fate.get('verdict', 'UNKNOWN')
-            verdict     = raw_verdict.split(' ')[0] if ' ' in raw_verdict else raw_verdict
-
-            pid = save_prediction(
-                agent_id            = AGENT_ID,
-                prediction_type     = "token",
-                subject             = token_addr.lower(),
-                verdict             = verdict,
-                score               = fate.get('score', 0) // 100,
-                raw_data            = fate,
-                attestation_uid     = receipt.get('uid', ''),
-                resolve_after_hours = RESOLVE_HOURS,
-            )
-            record_prediction()
-            predictions.append({"prediction_id": pid, "symbol": pair['baseToken']['symbol'], "verdict": verdict})
-            time.sleep(3)
-
-    except Exception as e:
-        log.error(f"Fallback scan error: {e}", exc_info=True)
-
-    return predictions
-
-
-# ── Entry point ───────────────────────────────────────────────────────────────
-
-def run_forever():
-    """
-    Start the watcher. Uses WebSocket if Alchemy key is configured,
-    falls back to periodic DexScreener scan otherwise.
-    """
-    alchemy_key = os.getenv("ALCHEMY_API_KEY")
-
-    if alchemy_key and alchemy_key != "demo":
-        log.info("Alchemy key found — using WebSocket event listener (real-time)")
-        listen_for_pairs()  # blocks, auto-reconnects
-    else:
-        log.warning(
-            "No ALCHEMY_API_KEY set — falling back to periodic DexScreener scan. "
-            "Add ALCHEMY_API_KEY for real-time event-driven predictions."
-        )
-        interval = int(os.getenv("WATCH_INTERVAL_SECONDS", "600"))
-        while True:
-            try:
-                run_fallback_scan()
-            except Exception as e:
-                log.error(f"Fallback scan error: {e}")
-            time.sleep(interval)
-
+        except Exception as e:
+            log.error(f"Fallback scan error: {e}")
+        
+        time.sleep(60)
 
 if __name__ == "__main__":
-    run_forever()
+    # If we have a WebSocket URL, use it. Otherwise fallback.
+    if "alchemy" in BASE_WSS or "quicknode" in BASE_WSS:
+        listen_for_pairs()
+    else:
+        log.warning("No Alchemy/QuickNode key found. Using fallback polling.")
+        run_fallback_scan()
