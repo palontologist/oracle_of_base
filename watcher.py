@@ -386,16 +386,12 @@ def run_fallback_scan() -> list[dict]:
     """
     predictions = []
     try:
-        url = "https://api.dexscreener.com/latest/dex/pairs/base"
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=15) as r:
-            pairs = json.loads(r.read().decode()).get('pairs') or []
-
-        now_ms = time.time() * 1000
+        # Use the same multi-feed approach as fetch_new_base_pairs
+        pairs      = fetch_new_base_pairs()
+        now_ms     = time.time() * 1000
         candidates = [
             p for p in pairs
             if (
-                (now_ms - p.get('pairCreatedAt', 0)) / (1000 * 3600) < 2 and
                 float(p.get('liquidity', {}).get('usd', 0) or 0) >= MIN_LIQUIDITY_USD and
                 not any(kw in p.get('baseToken', {}).get('symbol', '').upper()
                         for kw in ['USD', 'USDC', 'USDT', 'WETH', 'WBTC', 'DAI']) and
@@ -403,7 +399,7 @@ def run_fallback_scan() -> list[dict]:
             )
         ]
 
-        log.info(f"Fallback scan: {len(candidates)} new candidates")
+        log.info(f"Fallback scan: {len(candidates)} new candidates from {len(pairs)} resolved pairs")
 
         for pair in candidates[:5]:
             if not can_predict():
