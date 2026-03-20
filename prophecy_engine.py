@@ -106,7 +106,7 @@ class FinancialProphet:
             """
             
             payload = {
-                "model": "llama-3.3-70b", # Or another Venice model
+                "model": "qwen3-5-9b", # Or another Venice model
                 "messages": [
                     {"role": "system", "content": "You are a helpful AI assistant that outputs JSON."},
                     {"role": "user", "content": prompt}
