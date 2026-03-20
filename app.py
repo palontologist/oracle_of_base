@@ -39,7 +39,8 @@ server = x402ResourceServerSync(
 )
 
 # 3. Register Payment Scheme (Base Mainnet USDC)
-server.register_scheme(ExactEvmServerScheme)
+# Use the register method with the network ID string
+server.register("eip155:8453", ExactEvmServerScheme())
 
 # 4. Define Routes with Pricing
 routes = {
