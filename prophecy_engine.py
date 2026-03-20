@@ -1,6 +1,3 @@
-# The Oracle of Base (TOB) - Financial Prophecy Engine
-# Generates "Divine Safety Scores" for tokens on Base
-
 import json
 import time
 import hashlib
@@ -45,7 +42,7 @@ class FinancialProphet:
 
     def consult_the_stars(self, token_address):
         """
-        Analyzes a token address using real DexScreener data and Venice AI to generate a safety score.
+        Analyzes a token address using ONLY Venice AI (Qwen 2.5) to generate a safety score.
         """
         print(f"🔮 Gazing into the void for token: {token_address}...")
         
@@ -78,8 +75,11 @@ class FinancialProphet:
         # Call Venice API
         venice_api_key = os.getenv("VENICE_API_KEY")
         if not venice_api_key:
-            print("⚠️ Warning: VENICE_API_KEY not set. Falling back to simple math.")
-            return self._simple_math_analysis(token_data)
+            return {
+                "score": 0,
+                "verdict": "SILENT (Configuration Error)",
+                "details": {"error": "VENICE_API_KEY is missing. The Oracle cannot speak."}
+            }
             
         try:
             headers = {
@@ -106,7 +106,7 @@ class FinancialProphet:
             """
             
             payload = {
-                "model": "qwen3-5-9b", # Or another Venice model
+                "model": "qwen-2.5-32b", # Pure AI Reasoning
                 "messages": [
                     {"role": "system", "content": "You are a helpful AI assistant that outputs JSON."},
                     {"role": "user", "content": prompt}
@@ -119,7 +119,6 @@ class FinancialProphet:
             result = response.json()['choices'][0]['message']['content']
             
             # Parse JSON from Venice response
-            # Sometimes models wrap JSON in markdown code blocks
             if "```json" in result:
                 result = result.split("```json")[1].split("```")[0].strip()
             elif "```" in result:
@@ -140,63 +139,11 @@ class FinancialProphet:
             
         except Exception as e:
             print(f"❌ Error calling Venice API: {e}")
-            print("Falling back to simple math.")
-            return self._simple_math_analysis(token_data)
-
-    def _simple_math_analysis(self, token_data):
-        # Extract metrics
-        liquidity_usd = float(token_data['liquidity']['usd'])
-        fdv = float(token_data.get('fdv', 0))
-        volume_24h = float(token_data['volume']['h24'])
-        pair_age_hours = (time.time() * 1000 - token_data['pairCreatedAt']) / (1000 * 3600)
-        
-        # --- SCORING LOGIC ---
-        score = 0
-        
-        # 1. Liquidity Score (Max 4000)
-        if liquidity_usd > 500000: score += 4000
-        elif liquidity_usd > 100000: score += 3000
-        elif liquidity_usd > 10000: score += 1000
-        else: score += 0
-        
-        # 2. Volume Score (Max 2000)
-        if volume_24h > 100000: score += 2000
-        elif volume_24h > 10000: score += 1000
-        else: score += 500
-        
-        # 3. Age Score (Max 2000)
-        if pair_age_hours > 720: score += 2000 # > 30 days
-        elif pair_age_hours > 168: score += 1000 # > 7 days
-        elif pair_age_hours > 24: score += 500 # > 1 day
-        else: score -= 1000 # Brand new = risky
-        
-        # 4. FDV/Liquidity Ratio (Max 2000)
-        # Healthy ratio is usually FDV < 10x Liquidity
-        if liquidity_usd > 0:
-            ratio = fdv / liquidity_usd
-            if ratio < 5: score += 2000
-            elif ratio < 20: score += 1000
-            else: score -= 1000 # Overvalued or low liquidity
-            
-        final_score = max(0, min(10000, score))
-        
-        return {
-            "score": final_score,
-            "verdict": self._interpret_score(final_score),
-            "details": {
-                "liquidity_usd": liquidity_usd,
-                "volume_24h": volume_24h,
-                "pair_age_hours": round(pair_age_hours, 1),
-                "fdv_liquidity_ratio": round(fdv/liquidity_usd, 2) if liquidity_usd > 0 else "N/A",
-                "symbol": token_data['baseToken']['symbol'],
-                "name": token_data['baseToken']['name']
+            return {
+                "score": 0,
+                "verdict": "SILENT (Connection Error)",
+                "details": {"error": f"The spirits are unreachable: {str(e)}"}
             }
-        }
-
-    def _interpret_score(self, score):
-        if score > 8000: return "BLESSED (Safe)"
-        if score > 5000: return "MORTAL (Risky)"
-        return "CURSED (Rug imminent)"
 
     def generate_attestation(self, token_address, analysis_result):
         """
@@ -204,7 +151,7 @@ class FinancialProphet:
         """
         attestation = {
             "agentId": self.agent_id,
-            "target": token_address, # In reality, we attest to the Agent who created it, or the Token Contract Identity
+            "target": token_address,
             "value": analysis_result['score'],
             "valueDecimals": 2,
             "tag1": "financial-prophecy",
@@ -215,38 +162,3 @@ class FinancialProphet:
         }
         
         return attestation
-
-def main():
-    # Our Agent ID from registration
-    MY_AGENT_ID = "13fc4b5f265242c9a91da155017226fd" 
-    
-    oracle = FinancialProphet(MY_AGENT_ID, "private_key_placeholder")
-    
-    # Test Tokens
-    tokens = {
-        "DEGEN": "0x4ed4E862860beD51a9570b96d89aF5E1B0Efefed",
-        "BRETT": "0x532f27101965dd16442E59d40670FaF5eBB142E4"
-    }
-    
-    for name, address in tokens.items():
-        print(f"\n--- ANALYZING {name} ---")
-        fate = oracle.consult_the_stars(address)
-        
-        if fate['score'] == 0:
-            print(f"Could not analyze {name}")
-            continue
-            
-        receipt = oracle.generate_attestation(address, fate)
-        
-        print(f"Target: {address}")
-        print(f"Token: {fate['details']['name']} ({fate['details']['symbol']})")
-        print(f"Verdict: {fate['verdict']}")
-        print(f"Divine Score: {fate['score']/100}/100")
-        print(f"Details: {json.dumps(fate['details'], indent=2)}")
-        print("\n--- 🧾 ON-CHAIN RECEIPT (ERC-8004) ---")
-        print(json.dumps(receipt, indent=2))
-    
-    print("\n--- END OF PROPHECY ---")
-
-if __name__ == "__main__":
-    main()
