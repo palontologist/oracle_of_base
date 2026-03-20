@@ -5,3 +5,4 @@ python-dotenv
 requests
 eth-account
 x402[flask]
+psycopg2-binary
