@@ -14,8 +14,9 @@ from x402.mechanisms.evm.exact import ExactEvmServerScheme
 load_dotenv()
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from prophecy_engine import FinancialProphet
-from social_prophet import SocialProphet
+from prophecy_engine  import FinancialProphet
+from social_prophet   import SocialProphet
+from trust_engine     import full_prophecy
 from prediction_store import save_prediction, get_reputation_stats
 from resolution_engine import run_resolution_cycle
 
@@ -28,6 +29,7 @@ app = Flask(__name__)
 AGENT_ID       = "34499"
 PRIVATE_KEY    = os.getenv("AGENT_PRIVATE_KEY")
 WALLET_ADDRESS = "0x1EA37E2Fb76Aa396072204C90fcEF88093CEb920"
+RESOLVE_HOURS  = int(os.getenv("RESOLVE_AFTER_HOURS", "24"))
 
 # ── Oracles ───────────────────────────────────────────────────────────────────
 financial_oracle = FinancialProphet(AGENT_ID, PRIVATE_KEY)
@@ -47,7 +49,7 @@ routes = {
             "payTo":   WALLET_ADDRESS,
             "token":   "USDC"
         }],
-        "description": "AI financial prophecy",
+        "description": "AI financial prophecy — token safety score",
         "mimeType":    "application/json"
     },
     "GET /social-prophecy": {
@@ -57,23 +59,208 @@ routes = {
             "network": "eip155:8453",
             "payTo":   WALLET_ADDRESS
         }],
-        "description": "AI social prophecy",
+        "description": "AI social prophecy — agent purity score",
+        "mimeType":    "application/json"
+    },
+    "GET /combined-prophecy": {
+        "accepts": [{
+            "scheme":  "exact",
+            "price":   "$0.05",
+            "network": "eip155:8453",
+            "payTo":   WALLET_ADDRESS,
+            "token":   "USDC"
+        }],
+        "description": "Full trust assessment — token + deployer + social signals combined",
         "mimeType":    "application/json"
     },
 }
 
 
+# ── Routes ────────────────────────────────────────────────────────────────────
+
+@app.route('/prophecy', methods=['GET'])
+def get_financial_prophecy():
+    """Token safety score — on-chain metrics via DexScreener + Venice AI."""
+    token_address = request.args.get('token')
+    if not token_address:
+        return jsonify({"error": "Missing 'token'"}), 400
+    try:
+        fate    = financial_oracle.consult_the_stars(token_address)
+        if fate.get('score', 0) == 0:
+            return jsonify({"error": "Could not analyze", "details": fate.get('details')}), 404
+
+        receipt = financial_oracle.generate_attestation(token_address, fate)
+
+        prediction_id = save_prediction(
+            agent_id            = AGENT_ID,
+            prediction_type     = "token",
+            subject             = token_address,
+            verdict             = fate.get("verdict", "UNKNOWN").split(" ")[0],
+            score               = fate.get("score", 0) // 100,
+            raw_data            = fate,
+            attestation_uid     = receipt.get("uid", ""),
+            resolve_after_hours = RESOLVE_HOURS,
+        )
+        log.info(f"Prediction saved | id={prediction_id[:8]} | token={token_address}")
+
+        return jsonify({
+            "prophecy":      fate,
+            "receipt":       receipt,
+            "prediction_id": prediction_id,
+        })
+    except Exception as e:
+        log.error(f"/prophecy error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/social-prophecy', methods=['GET'])
+def get_social_prophecy():
+    """Agent purity score — Farcaster identity + posting behaviour + wallet activity."""
+    handle = request.args.get('handle')
+    if not handle:
+        return jsonify({"error": "Missing 'handle'"}), 400
+    try:
+        fate    = social_oracle.consult_the_spirits(handle)
+        receipt = social_oracle.generate_attestation(handle, fate)
+
+        prediction_id = save_prediction(
+            agent_id            = AGENT_ID,
+            prediction_type     = "social",
+            subject             = handle,
+            verdict             = fate.get("verdict", "UNKNOWN").split(" ")[0],
+            score               = fate.get("score", 0) // 100,
+            raw_data            = fate,
+            attestation_uid     = receipt.get("uid", ""),
+            resolve_after_hours = RESOLVE_HOURS,
+        )
+        log.info(f"Social prediction saved | id={prediction_id[:8]} | handle={handle}")
+
+        return jsonify({
+            "prophecy":      fate,
+            "receipt":       receipt,
+            "prediction_id": prediction_id,
+        })
+    except Exception as e:
+        log.error(f"/social-prophecy error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/combined-prophecy', methods=['GET'])
+def get_combined_prophecy():
+    """
+    Full trust assessment combining all three signal layers:
+      - Token safety (on-chain metrics + Venice AI)
+      - Deployer history (previous tokens + rug rate)
+      - Social promotion (Farcaster mentions + bot detection)
+
+    This is the premium endpoint — $0.05 via x402.
+    Returns a single unified verdict with confidence score.
+    """
+    token_address = request.args.get('token')
+    if not token_address:
+        return jsonify({"error": "Missing 'token'"}), 400
+
+    try:
+        result = full_prophecy(
+            token_address    = token_address,
+            financial_prophet = financial_oracle,
+            social_prophet    = social_oracle,
+        )
+
+        if result.get('status') == 'failed':
+            return jsonify({"error": result.get('reason'), "details": result}), 404
+
+        # Save as a combined prediction for resolution tracking
+        prediction_id = save_prediction(
+            agent_id            = AGENT_ID,
+            prediction_type     = "token",
+            subject             = token_address,
+            verdict             = result.get("verdict", "UNKNOWN"),
+            score               = result.get("final_score", 0),
+            raw_data            = result,
+            attestation_uid     = result.get('attestation', {}).get('uid', ''),
+            resolve_after_hours = RESOLVE_HOURS,
+        )
+        log.info(
+            f"Combined prophecy saved | id={prediction_id[:8]} | "
+            f"token={token_address} | verdict={result.get('verdict')} | "
+            f"score={result.get('final_score')} | confidence={result.get('confidence')}"
+        )
+
+        return jsonify({
+            **result,
+            "prediction_id": prediction_id,
+        })
+
+    except Exception as e:
+        log.error(f"/combined-prophecy error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/reputation', methods=['GET'])
+def get_reputation():
+    """Public trust stats — queryable by any agent before buying signals."""
+    agent_id = request.args.get('agent_id', AGENT_ID)
+    stats    = get_reputation_stats(agent_id)
+    return jsonify(stats)
+
+
+@app.route('/trust-check', methods=['GET'])
+def trust_check():
+    """
+    Simple yes/no trust gate for agent-to-agent commerce.
+    Free endpoint — drives discovery.
+    Other agents call this before deciding to pay for full signals.
+    """
+    stats       = get_reputation_stats(AGENT_ID)
+    trust_score = stats.get("trust_score") or 0
+    total       = stats.get("total_resolved") or 0
+
+    return jsonify({
+        "trusted":       trust_score >= 70 and total >= 5,
+        "trust_score":   trust_score,
+        "total_resolved": total,
+        "agent_id":      AGENT_ID,
+        "wallet":        WALLET_ADDRESS,
+        "meets_threshold": {
+            "min_score":    70,
+            "min_resolved": 5,
+        }
+    })
+
+
+@app.route('/resolve', methods=['GET', 'POST'])
+def trigger_resolution():
+    """Manually trigger a resolution cycle — useful for testing."""
+    results = run_resolution_cycle()
+    return jsonify({
+        "resolved": len(results),
+        "results":  results,
+    })
+
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    stats = get_reputation_stats(AGENT_ID)
+    return jsonify({
+        "status":      "ok",
+        "service":     "Oracle of Base",
+        "trust_score": stats.get("trust_score"),
+        "resolved":    stats.get("total_resolved"),
+        "pending":     stats.get("pending"),
+        "endpoints": {
+            "free":    ["/health", "/trust-check", "/reputation"],
+            "$0.01":   ["/prophecy", "/social-prophecy"],
+            "$0.05":   ["/combined-prophecy"],
+        }
+    })
+
+
 # ── Background resolution scheduler ──────────────────────────────────────────
-# NOTE: Called at module level so gunicorn picks it up on import,
-# not just when running `python app.py` directly.
 
 _scheduler_started = False
 
 def start_resolution_scheduler():
-    """
-    Starts the resolution engine in a daemon thread.
-    Guard flag prevents duplicate threads if gunicorn spawns multiple workers.
-    """
     global _scheduler_started
     if _scheduler_started:
         return
@@ -96,119 +283,8 @@ def start_resolution_scheduler():
     t.start()
     log.info("Resolution engine thread started.")
 
-# ← Runs at import time, so gunicorn triggers it automatically
+# Start at import time so gunicorn picks it up
 start_resolution_scheduler()
-
-
-# ── Routes ────────────────────────────────────────────────────────────────────
-
-@app.route('/prophecy', methods=['GET'])
-def get_financial_prophecy():
-    token_address = request.args.get('token')
-    if not token_address:
-        return jsonify({"error": "Missing 'token'"}), 400
-    try:
-        fate = financial_oracle.consult_the_stars(token_address)
-        if fate.get('score', 0) == 0:
-            return jsonify({"error": "Could not analyze", "details": fate.get('details')}), 404
-
-        receipt = financial_oracle.generate_attestation(token_address, fate)
-
-        prediction_id = save_prediction(
-            agent_id            = AGENT_ID,
-            prediction_type     = "token",
-            subject             = token_address,
-            verdict             = fate.get("verdict", "UNKNOWN"),
-            score               = fate.get("score", 0),
-            raw_data            = fate,
-            attestation_uid     = receipt.get("uid", ""),
-            resolve_after_hours = 0,
-        )
-        log.info(f"Prediction saved | id={prediction_id[:8]} | token={token_address}")
-
-        return jsonify({
-            "prophecy":      fate,
-            "receipt":       receipt,
-            "prediction_id": prediction_id,
-        })
-    except Exception as e:
-        log.error(f"/prophecy error: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/social-prophecy', methods=['GET'])
-def get_social_prophecy():
-    handle = request.args.get('handle')
-    if not handle:
-        return jsonify({"error": "Missing 'handle'"}), 400
-    try:
-        fate    = social_oracle.consult_the_spirits(handle)
-        receipt = social_oracle.generate_attestation(handle, fate)
-
-        prediction_id = save_prediction(
-            agent_id            = AGENT_ID,
-            prediction_type     = "social",
-            subject             = handle,
-            verdict             = fate.get("verdict", "UNKNOWN"),
-            score               = fate.get("score", 0),
-            raw_data            = fate,
-            attestation_uid     = receipt.get("uid", ""),
-            resolve_after_hours = 24,
-        )
-        log.info(f"Prediction saved | id={prediction_id[:8]} | handle={handle}")
-
-        return jsonify({
-            "prophecy":      fate,
-            "receipt":       receipt,
-            "prediction_id": prediction_id,
-        })
-    except Exception as e:
-        log.error(f"/social-prophecy error: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/trust-check', methods=['GET'])
-def trust_check():
-    """
-    Simple yes/no trust gate for agent-to-agent commerce.
-    Returns whether this Oracle meets a minimum trust threshold.
-    """
-    stats = get_reputation_stats(AGENT_ID)
-    trust_score = stats.get("trust_score") or 0
-    total = stats.get("total_resolved") or 0
-    
-    return jsonify({
-        "trusted": trust_score >= 70 and total >= 5,
-        "trust_score": trust_score,
-        "total_resolved": total,
-        "meets_threshold": {
-            "min_score": 70,
-            "min_resolved": 5,
-        }
-    })
-
-
-@app.route('/resolve', methods=['GET','POST'])
-def trigger_resolution():
-    """Manually trigger a resolution cycle — useful for testing."""
-    results = run_resolution_cycle()
-    return jsonify({
-        "resolved": len(results),
-        "results":  results,
-    })
-
-
-@app.route('/health', methods=['GET'])
-def health_check():
-    stats = get_reputation_stats(AGENT_ID)
-    return jsonify({
-        "status":      "ok",
-        "service":     "Oracle of Base",
-        "trust_score": stats.get("trust_score"),
-        "resolved":    stats.get("total_resolved"),
-        "pending":     stats.get("pending"),
-    })
-
 
 # ── x402 Payment Middleware ───────────────────────────────────────────────────
 PaymentMiddleware(app, server, routes)
