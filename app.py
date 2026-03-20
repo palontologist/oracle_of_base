@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 import os
 import sys
+from types import SimpleNamespace
 from dotenv import load_dotenv
 
 # x402 imports
@@ -11,6 +12,7 @@ from x402.mechanisms.evm.exact import ExactEvmServerScheme
 
 load_dotenv()
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 from prophecy_engine import FinancialProphet
 from social_prophet import SocialProphet
 
@@ -25,29 +27,40 @@ WALLET_ADDRESS = "0x1EA37E2Fb76Aa396072204C90fcEF88093CEb920"
 financial_oracle = FinancialProphet(AGENT_ID, PRIVATE_KEY)
 social_oracle = SocialProphet(AGENT_ID, PRIVATE_KEY)
 
-# x402 Setup (before routes)
-facilitator = HTTPFacilitatorClientSync("https://facilitator.x402.org")
+# x402 Setup
+# FIX: HTTPFacilitatorClientSync expects a config object with a .url attribute,
+# not a raw string. We use SimpleNamespace as a lightweight config wrapper.
+_facilitator_config = SimpleNamespace(url="https://facilitator.x402.org")
+facilitator = HTTPFacilitatorClientSync(_facilitator_config)
+
 server = x402ResourceServerSync(facilitator_clients=[facilitator])
 server.register("eip155:8453", ExactEvmServerScheme())
 
 routes = {
     "GET /prophecy": {
         "accepts": [{
-            "scheme": "exact", "price": "$0.01", "network": "eip155:8453",
-            "payTo": WALLET_ADDRESS, "token": "USDC"
+            "scheme": "exact",
+            "price": "$0.01",
+            "network": "eip155:8453",
+            "payTo": WALLET_ADDRESS,
+            "token": "USDC"
         }],
-        "description": "AI financial prophecy", "mimeType": "application/json"
+        "description": "AI financial prophecy",
+        "mimeType": "application/json"
     },
     "GET /social-prophecy": {
         "accepts": [{
-            "scheme": "exact", "price": "$0.01", "network": "eip155:8453",
+            "scheme": "exact",
+            "price": "$0.01",
+            "network": "eip155:8453",
             "payTo": WALLET_ADDRESS
         }],
-        "description": "AI social prophecy", "mimeType": "application/json"
+        "description": "AI social prophecy",
+        "mimeType": "application/json"
     }
 }
 
-# ALL ROUTES FIRST (ensures app.wsgi_app exists)
+
 @app.route('/prophecy', methods=['GET'])
 def get_financial_prophecy():
     token_address = request.args.get('token')
@@ -62,6 +75,7 @@ def get_financial_prophecy():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 @app.route('/social-prophecy', methods=['GET'])
 def get_social_prophecy():
     handle = request.args.get('handle')
@@ -74,11 +88,13 @@ def get_social_prophecy():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({"status": "ok", "service": "Oracle of Base"})
 
-# ✅ FIXED: Apply AFTER routes (app.wsgi_app now exists)
+
+# Apply PaymentMiddleware AFTER all routes are registered
 app.wsgi_app = PaymentMiddleware(app.wsgi_app, server, routes)
 
 if __name__ == '__main__':
