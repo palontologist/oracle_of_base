@@ -1,6 +1,8 @@
 from flask import Flask, request, jsonify
 import os
 import sys
+import threading
+import logging
 from dotenv import load_dotenv
 
 # x402 imports
@@ -14,51 +16,54 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from prophecy_engine import FinancialProphet
 from social_prophet import SocialProphet
+from prediction_store import save_prediction, get_reputation_stats
+from resolution_engine import run_resolution_cycle
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("app")
 
 app = Flask(__name__)
 
-# Config
-AGENT_ID = "34499"
-PRIVATE_KEY = os.getenv("AGENT_PRIVATE_KEY")
+# ── Config ────────────────────────────────────────────────────────────────────
+AGENT_ID       = "34499"
+PRIVATE_KEY    = os.getenv("AGENT_PRIVATE_KEY")
 WALLET_ADDRESS = "0x1EA37E2Fb76Aa396072204C90fcEF88093CEb920"
 
-# Oracles
+# ── Oracles ───────────────────────────────────────────────────────────────────
 financial_oracle = FinancialProphet(AGENT_ID, PRIVATE_KEY)
-social_oracle = SocialProphet(AGENT_ID, PRIVATE_KEY)
+social_oracle    = SocialProphet(AGENT_ID, PRIVATE_KEY)
 
-# x402 Setup
-# FIX: HTTPFacilitatorClientSync expects a config object with a .url attribute,
-# not a raw string. We use SimpleNamespace as a lightweight config wrapper.
-# FIX: HTTPFacilitatorClientSync accepts a plain dict with a "url" key
+# ── x402 Setup ────────────────────────────────────────────────────────────────
 facilitator = HTTPFacilitatorClientSync({"url": "https://facilitator.x402.org"})
-
-server = x402ResourceServerSync(facilitator_clients=[facilitator])
+server      = x402ResourceServerSync(facilitator_clients=[facilitator])
 server.register("eip155:8453", ExactEvmServerScheme())
 
 routes = {
     "GET /prophecy": {
         "accepts": [{
-            "scheme": "exact",
-            "price": "$0.01",
+            "scheme":  "exact",
+            "price":   "$0.01",
             "network": "eip155:8453",
-            "payTo": WALLET_ADDRESS,
-            "token": "USDC"
+            "payTo":   WALLET_ADDRESS,
+            "token":   "USDC"
         }],
         "description": "AI financial prophecy",
-        "mimeType": "application/json"
+        "mimeType":    "application/json"
     },
     "GET /social-prophecy": {
         "accepts": [{
-            "scheme": "exact",
-            "price": "$0.01",
+            "scheme":  "exact",
+            "price":   "$0.01",
             "network": "eip155:8453",
-            "payTo": WALLET_ADDRESS
+            "payTo":   WALLET_ADDRESS
         }],
         "description": "AI social prophecy",
-        "mimeType": "application/json"
-    }
+        "mimeType":    "application/json"
+    },
 }
 
+
+# ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.route('/prophecy', methods=['GET'])
 def get_financial_prophecy():
@@ -66,12 +71,32 @@ def get_financial_prophecy():
     if not token_address:
         return jsonify({"error": "Missing 'token'"}), 400
     try:
-        fate = financial_oracle.consult_the_stars(token_address)
+        fate    = financial_oracle.consult_the_stars(token_address)
         if fate.get('score', 0) == 0:
             return jsonify({"error": "Could not analyze", "details": fate.get('details')}), 404
+
         receipt = financial_oracle.generate_attestation(token_address, fate)
-        return jsonify({"prophecy": fate, "receipt": receipt})
+
+        # ── Persist prediction for resolution tracking ──────────────────────
+        prediction_id = save_prediction(
+            agent_id        = AGENT_ID,
+            prediction_type = "token",
+            subject         = token_address,
+            verdict         = fate.get("verdict", "UNKNOWN"),
+            score           = fate.get("score", 0),
+            raw_data        = fate,
+            attestation_uid = receipt.get("uid", ""),
+            resolve_after_hours = 24,
+        )
+        log.info(f"Prediction saved | id={prediction_id[:8]} | token={token_address}")
+
+        return jsonify({
+            "prophecy":      fate,
+            "receipt":       receipt,
+            "prediction_id": prediction_id,
+        })
     except Exception as e:
+        log.error(f"/prophecy error: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
@@ -81,20 +106,98 @@ def get_social_prophecy():
     if not handle:
         return jsonify({"error": "Missing 'handle'"}), 400
     try:
-        fate = social_oracle.consult_the_spirits(handle)
+        fate    = social_oracle.consult_the_spirits(handle)
         receipt = social_oracle.generate_attestation(handle, fate)
-        return jsonify({"prophecy": fate, "receipt": receipt})
+
+        # ── Persist prediction for resolution tracking ──────────────────────
+        prediction_id = save_prediction(
+            agent_id        = AGENT_ID,
+            prediction_type = "social",
+            subject         = handle,
+            verdict         = fate.get("verdict", "UNKNOWN"),
+            score           = fate.get("score", 0),
+            raw_data        = fate,
+            attestation_uid = receipt.get("uid", ""),
+            resolve_after_hours = 24,
+        )
+        log.info(f"Prediction saved | id={prediction_id[:8]} | handle={handle}")
+
+        return jsonify({
+            "prophecy":      fate,
+            "receipt":       receipt,
+            "prediction_id": prediction_id,
+        })
     except Exception as e:
+        log.error(f"/social-prophecy error: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/reputation', methods=['GET'])
+def get_reputation():
+    """
+    Public reputation endpoint — queryable by any agent before buying signals.
+    Returns the Oracle's full trust stats.
+    """
+    agent_id = request.args.get('agent_id', AGENT_ID)
+    stats    = get_reputation_stats(agent_id)
+    return jsonify(stats)
+
+
+@app.route('/resolve', methods=['POST'])
+def trigger_resolution():
+    """
+    Manually trigger a resolution cycle (useful for testing).
+    In production this runs automatically in the background thread.
+    """
+    results = run_resolution_cycle()
+    return jsonify({
+        "resolved": len(results),
+        "results":  results,
+    })
 
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    return jsonify({"status": "ok", "service": "Oracle of Base"})
+    stats = get_reputation_stats(AGENT_ID)
+    return jsonify({
+        "status":      "ok",
+        "service":     "Oracle of Base",
+        "trust_score": stats.get("trust_score"),
+        "resolved":    stats.get("total_resolved"),
+        "pending":     stats.get("pending"),
+    })
 
 
-# PaymentMiddleware registers itself with the app internally — no assignment needed
+# ── Background resolution scheduler ──────────────────────────────────────────
+
+def _resolution_loop():
+    """
+    Runs in a daemon thread — checks for due predictions every 5 minutes.
+    Won't block the Flask server from starting.
+    """
+    import time
+    interval = int(os.getenv("RESOLUTION_POLL_SECONDS", "300"))
+    log.info(f"Resolution scheduler started (interval={interval}s)")
+    while True:
+        try:
+            results = run_resolution_cycle()
+            if results:
+                log.info(f"Resolution cycle complete: {len(results)} resolved")
+        except Exception as e:
+            log.error(f"Resolution cycle error: {e}", exc_info=True)
+        time.sleep(interval)
+
+
+def start_resolution_scheduler():
+    t = threading.Thread(target=_resolution_loop, daemon=True, name="resolution-engine")
+    t.start()
+    log.info("Resolution engine thread started.")
+
+
+# ── x402 Payment Middleware ───────────────────────────────────────────────────
 PaymentMiddleware(app, server, routes)
 
+# ── Start ─────────────────────────────────────────────────────────────────────
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5001, debug=True)
+    start_resolution_scheduler()
+    app.run(host='0.0.0.0', port=5001, debug=False)
