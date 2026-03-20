@@ -106,7 +106,7 @@ class FinancialProphet:
             """
             
             payload = {
-                "model": "qwen-2.5-32b", # Using Qwen 2.5 32B (Best available Qwen on Venice)
+                "model": "qwen3-5-9b", # Using Qwen 2.5 32B (Best available Qwen on Venice)
                 "messages": [
                     {"role": "system", "content": "You are an intelligent quant oracle that outputs JSON."},
                     {"role": "user", "content": prompt}
