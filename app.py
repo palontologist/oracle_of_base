@@ -3,7 +3,8 @@ import os
 import sys
 from dotenv import load_dotenv
 # --- CORRECT IMPORTS FOR x402 ---
-from x402.server import x402ResourceServerSync, FacilitatorClientSync
+from x402.server import x402ResourceServerSync
+from x402.http.facilitator_client import HTTPFacilitatorClientSync
 from x402.http.middleware.flask import PaymentMiddleware
 from x402.mechanisms.evm.exact import ExactEvmServerScheme
 
@@ -28,8 +29,8 @@ social_oracle = SocialProphet(AGENT_ID, PRIVATE_KEY)
 
 # --- x402 Payment Setup (FIXED) ---
 # 1. Create Facilitator Client (Sync)
-# The library requires this object, not just a URL string
-facilitator = FacilitatorClientSync(url="https://facilitator.x402.org")
+# Use the HTTP implementation, not the Protocol interface
+facilitator = HTTPFacilitatorClientSync(url="https://facilitator.x402.org")
 
 # 2. Create Server (Sync)
 # Pass the client object in a list
