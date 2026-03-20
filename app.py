@@ -175,7 +175,7 @@ def get_reputation():
     return jsonify(stats)
 
 
-@app.route('/resolve', methods=['POST'])
+@app.route('/resolve', methods=['GET','POST'])
 def trigger_resolution():
     """Manually trigger a resolution cycle — useful for testing."""
     results = run_resolution_cycle()
