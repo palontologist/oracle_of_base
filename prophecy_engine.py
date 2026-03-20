@@ -106,7 +106,7 @@ class FinancialProphet:
             """
             
             payload = {
-                "model": "qwen-2.5-32b", # Pure AI Reasoning
+                "model": "qwen3-5-9b", # Pure AI Reasoning
                 "messages": [
                     {"role": "system", "content": "You are a helpful AI assistant that outputs JSON."},
                     {"role": "user", "content": prompt}
