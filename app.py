@@ -2,7 +2,8 @@ from flask import Flask, request, jsonify
 import os
 import sys
 from dotenv import load_dotenv
-from x402.server import x402ResourceServer
+# --- CORRECT IMPORTS FOR x402 ---
+from x402.server import x402ResourceServerSync, FacilitatorClientSync
 from x402.http.middleware.flask import PaymentMiddleware
 from x402.mechanisms.evm.exact import ExactEvmServerScheme
 
@@ -21,22 +22,25 @@ AGENT_ID = "34499"
 PRIVATE_KEY = os.getenv("AGENT_PRIVATE_KEY")
 WALLET_ADDRESS = "0x1EA37E2Fb76Aa396072204C90fcEF88093CEb920" # Your burner wallet
 
-# Initialize with AGENT_ID and PRIVATE_KEY
+# Initialize with AGENT_ID and PRIVATE_KEY (Matches your engine)
 financial_oracle = FinancialProphet(AGENT_ID, PRIVATE_KEY)
 social_oracle = SocialProphet(AGENT_ID, PRIVATE_KEY)
 
-# --- x402 Payment Setup ---
-# 1. Create Server
-server = x402ResourceServer(
-    facilitator_url="https://facilitator.x402.org", # Mainnet Facilitator
-    service_name="The Oracle of Base",
-    service_image_url="https://oracle.nanobot.dev/logo.png"
+# --- x402 Payment Setup (FIXED) ---
+# 1. Create Facilitator Client (Sync)
+# The library requires this object, not just a URL string
+facilitator = FacilitatorClientSync(url="https://facilitator.x402.org")
+
+# 2. Create Server (Sync)
+# Pass the client object in a list
+server = x402ResourceServerSync(
+    facilitator_clients=[facilitator]
 )
 
-# 2. Register Payment Scheme (Base Mainnet USDC)
+# 3. Register Payment Scheme (Base Mainnet USDC)
 server.register_scheme(ExactEvmServerScheme)
 
-# 3. Define Routes with Pricing
+# 4. Define Routes with Pricing
 routes = {
     "GET /prophecy": {
         "accepts": [
@@ -65,7 +69,7 @@ routes = {
     }
 }
 
-# 4. Apply Middleware
+# 5. Apply Middleware
 app.wsgi_app = PaymentMiddleware(app.wsgi_app, server, routes)
 
 @app.route('/prophecy', methods=['GET'])
@@ -82,7 +86,6 @@ def get_financial_prophecy():
             return jsonify({"error": "Could not analyze token", "details": fate.get('details')}), 404
             
         # Generate Receipt
-        # Note: generate_attestation now only needs (token_address, fate)
         receipt = financial_oracle.generate_attestation(token_address, fate)
         
         return jsonify({
