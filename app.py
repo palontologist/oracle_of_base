@@ -122,7 +122,7 @@ def get_financial_prophecy():
             score               = fate.get("score", 0),
             raw_data            = fate,
             attestation_uid     = receipt.get("uid", ""),
-            resolve_after_hours = 24,
+            resolve_after_hours = 0,
         )
         log.info(f"Prediction saved | id={prediction_id[:8]} | token={token_address}")
 
@@ -167,12 +167,25 @@ def get_social_prophecy():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/reputation', methods=['GET'])
-def get_reputation():
-    """Public trust stats — queryable by any agent before buying signals."""
-    agent_id = request.args.get('agent_id', AGENT_ID)
-    stats    = get_reputation_stats(agent_id)
-    return jsonify(stats)
+@app.route('/trust-check', methods=['GET'])
+def trust_check():
+    """
+    Simple yes/no trust gate for agent-to-agent commerce.
+    Returns whether this Oracle meets a minimum trust threshold.
+    """
+    stats = get_reputation_stats(AGENT_ID)
+    trust_score = stats.get("trust_score") or 0
+    total = stats.get("total_resolved") or 0
+    
+    return jsonify({
+        "trusted": trust_score >= 70 and total >= 5,
+        "trust_score": trust_score,
+        "total_resolved": total,
+        "meets_threshold": {
+            "min_score": 70,
+            "min_resolved": 5,
+        }
+    })
 
 
 @app.route('/resolve', methods=['GET','POST'])
