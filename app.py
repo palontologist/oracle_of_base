@@ -17,8 +17,8 @@ app = Flask(__name__)
 AGENT_ID = "34499"
 PRIVATE_KEY = os.getenv("AGENT_PRIVATE_KEY")
 
-financial_oracle = FinancialProphet(AGENT_ID, PRIVATE_KEY)
-social_oracle = SocialProphet(AGENT_ID, PRIVATE_KEY)
+financial_oracle = FinancialProphet(PRIVATE_KEY)
+social_oracle = SocialProphet(AGENT_ID, PRIVATE_KEY) # SocialProphet still uses old init for now
 
 @app.route('/prophecy', methods=['GET'])
 def get_financial_prophecy():
@@ -34,7 +34,7 @@ def get_financial_prophecy():
             return jsonify({"error": "Could not analyze token", "details": fate.get('details')}), 404
             
         # Generate Receipt
-        receipt = financial_oracle.generate_attestation(token_address, fate)
+        receipt = financial_oracle.generate_attestation(AGENT_ID, token_address, fate)
         
         return jsonify({
             "prophecy": fate,

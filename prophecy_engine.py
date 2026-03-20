@@ -108,10 +108,10 @@ class FinancialProphet:
             payload = {
                 "model": "qwen3-5-9b", # Pure AI Reasoning
                 "messages": [
-                    {"role": "system", "content": "You are a helpful AI assistant that outputs JSON."},
+                    {"role": "system", "content": "You are an intelligent quant oracle that outputs JSON."},
                     {"role": "user", "content": prompt}
                 ],
-                "temperature": 0.7
+                "temperature": 0.9
             }
             
             response = requests.post("https://api.venice.ai/api/v1/chat/completions", headers=headers, json=payload)
