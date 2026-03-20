@@ -145,26 +145,13 @@ def full_prophecy(
     # ── Step 1: Full token + deployer + promoter analysis ────────────────────
     token_result = financial_prophet.consult_the_stars(token_address)
 
-    # Only fail if DexScreener genuinely couldn't find the token.
-    # Venice failures (score=0 with SILENT verdict) should still proceed
-    # so deployer + promoter signals can contribute.
-    error_msg = str(token_result.get('details', {}).get('error', ''))
-    dexscreener_failed = (
-        'not found' in error_msg.lower() or
-        'no base pairs' in error_msg.lower() or
-        'no data' in token_result.get('verdict', '').lower()
-    )
-    if dexscreener_failed:
+    # If token lookup failed entirely
+    if token_result.get('score', 0) == 0 and 'No Data' in token_result.get('verdict', ''):
         return {
             "status":        "failed",
             "reason":        "token_not_found",
             "token_address": token_address,
         }
-
-    # If Venice failed but DexScreener worked, default token_score to 50
-    # so deployer + promoter signals still contribute to final verdict
-    if not token_result.get('token_score'):
-        token_result['token_score'] = 50
 
     # Extract sub-scores from prophecy_engine's result
     # prophecy_engine now returns token_score, deployer_score, promoter_score
