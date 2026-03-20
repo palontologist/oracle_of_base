@@ -6,6 +6,8 @@ import time
 import hashlib
 import urllib.request
 import urllib.error
+import os
+import requests
 
 # ERC-8004 Registry Addresses (Base Mainnet)
 IDENTITY_REGISTRY = "0x8004A169FB4a3325136EB29fA0ceB6D2e539a432"
@@ -43,7 +45,7 @@ class FinancialProphet:
 
     def consult_the_stars(self, token_address):
         """
-        Analyzes a token address using real DexScreener data to generate a safety score.
+        Analyzes a token address using real DexScreener data and Venice AI to generate a safety score.
         """
         print(f"🔮 Gazing into the void for token: {token_address}...")
         
@@ -56,6 +58,92 @@ class FinancialProphet:
                 "details": {"error": "Token not found on DexScreener or no Base pairs"}
             }
 
+        # Extract metrics
+        liquidity_usd = float(token_data['liquidity']['usd'])
+        fdv = float(token_data.get('fdv', 0))
+        volume_24h = float(token_data['volume']['h24'])
+        pair_age_hours = (time.time() * 1000 - token_data['pairCreatedAt']) / (1000 * 3600)
+        
+        # Prepare data for Venice
+        analysis_data = {
+            "symbol": token_data['baseToken']['symbol'],
+            "name": token_data['baseToken']['name'],
+            "liquidity_usd": liquidity_usd,
+            "volume_24h": volume_24h,
+            "fdv": fdv,
+            "pair_age_hours": pair_age_hours,
+            "price_change_24h": float(token_data.get('priceChange', {}).get('h24', 0))
+        }
+        
+        # Call Venice API
+        venice_api_key = os.getenv("VENICE_API_KEY")
+        if not venice_api_key:
+            print("⚠️ Warning: VENICE_API_KEY not set. Falling back to simple math.")
+            return self._simple_math_analysis(token_data)
+            
+        try:
+            headers = {
+                "Authorization": f"Bearer {venice_api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            prompt = f"""
+            You are The Oracle of Base, a mystical AI that judges crypto tokens.
+            Analyze this token data on Base network:
+            {json.dumps(analysis_data, indent=2)}
+            
+            Task:
+            1. Determine if this token is Safe (BLESSED), Risky (MORTAL), or a Scam (CURSED).
+            2. Assign a "Divine Safety Score" from 0 to 100.
+            3. Provide a short, poetic reason for your verdict.
+            
+            Return ONLY a JSON object with this format:
+            {{
+                "score": <number 0-100>,
+                "verdict": "<BLESSED/MORTAL/CURSED>",
+                "reason": "<short poetic reason>"
+            }}
+            """
+            
+            payload = {
+                "model": "llama-3.3-70b", # Or another Venice model
+                "messages": [
+                    {"role": "system", "content": "You are a helpful AI assistant that outputs JSON."},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.7
+            }
+            
+            response = requests.post("https://api.venice.ai/api/v1/chat/completions", headers=headers, json=payload)
+            response.raise_for_status()
+            result = response.json()['choices'][0]['message']['content']
+            
+            # Parse JSON from Venice response
+            # Sometimes models wrap JSON in markdown code blocks
+            if "```json" in result:
+                result = result.split("```json")[1].split("```")[0].strip()
+            elif "```" in result:
+                result = result.split("```")[1].split("```")[0].strip()
+                
+            venice_analysis = json.loads(result)
+            
+            final_score = int(venice_analysis['score'] * 100) # Convert 0-100 to 0-10000
+            
+            return {
+                "score": final_score,
+                "verdict": f"{venice_analysis['verdict']} ({venice_analysis['reason']})",
+                "details": {
+                    **analysis_data,
+                    "venice_reason": venice_analysis['reason']
+                }
+            }
+            
+        except Exception as e:
+            print(f"❌ Error calling Venice API: {e}")
+            print("Falling back to simple math.")
+            return self._simple_math_analysis(token_data)
+
+    def _simple_math_analysis(self, token_data):
         # Extract metrics
         liquidity_usd = float(token_data['liquidity']['usd'])
         fdv = float(token_data.get('fdv', 0))
