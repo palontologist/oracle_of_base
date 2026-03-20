@@ -6,3 +6,4 @@ requests
 eth-account
 x402[flask]
 psycopg2-binary
+websocket-client

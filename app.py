@@ -286,6 +286,37 @@ def start_resolution_scheduler():
 # Start at import time so gunicorn picks it up
 start_resolution_scheduler()
 
+# ── Background watcher ────────────────────────────────────────────────────────
+ 
+_watcher_started = False
+ 
+def start_watcher():
+    global _watcher_started
+    if _watcher_started:
+        return
+    _watcher_started = True
+ 
+    def _loop():
+        import time as _time
+        interval = int(os.getenv("WATCH_INTERVAL_SECONDS", "600"))
+        log.info(f"Watcher thread started (interval={interval}s)")
+        # Small initial delay so app finishes booting before first scan
+        _time.sleep(30)
+        while True:
+            try:
+                results = run_watch_cycle()
+                if results:
+                    log.info(f"Watcher cycle: {len(results)} new predictions")
+            except Exception as e:
+                log.error(f"Watcher error: {e}", exc_info=True)
+            _time.sleep(interval)
+ 
+    t = threading.Thread(target=_loop, daemon=True, name="watcher")
+    t.start()
+    log.info("Watcher thread started.")
+ 
+start_watcher()
+
 # ── x402 Payment Middleware ───────────────────────────────────────────────────
 PaymentMiddleware(app, server, routes)
 
