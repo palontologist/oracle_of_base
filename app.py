@@ -63,6 +63,43 @@ routes = {
 }
 
 
+# ── Background resolution scheduler ──────────────────────────────────────────
+# NOTE: Called at module level so gunicorn picks it up on import,
+# not just when running `python app.py` directly.
+
+_scheduler_started = False
+
+def start_resolution_scheduler():
+    """
+    Starts the resolution engine in a daemon thread.
+    Guard flag prevents duplicate threads if gunicorn spawns multiple workers.
+    """
+    global _scheduler_started
+    if _scheduler_started:
+        return
+    _scheduler_started = True
+
+    def _loop():
+        import time
+        interval = int(os.getenv("RESOLUTION_POLL_SECONDS", "300"))
+        log.info(f"Resolution scheduler started (interval={interval}s)")
+        while True:
+            try:
+                results = run_resolution_cycle()
+                if results:
+                    log.info(f"Resolution cycle: {len(results)} resolved")
+            except Exception as e:
+                log.error(f"Resolution cycle error: {e}", exc_info=True)
+            time.sleep(interval)
+
+    t = threading.Thread(target=_loop, daemon=True, name="resolution-engine")
+    t.start()
+    log.info("Resolution engine thread started.")
+
+# ← Runs at import time, so gunicorn triggers it automatically
+start_resolution_scheduler()
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.route('/prophecy', methods=['GET'])
@@ -71,21 +108,20 @@ def get_financial_prophecy():
     if not token_address:
         return jsonify({"error": "Missing 'token'"}), 400
     try:
-        fate    = financial_oracle.consult_the_stars(token_address)
+        fate = financial_oracle.consult_the_stars(token_address)
         if fate.get('score', 0) == 0:
             return jsonify({"error": "Could not analyze", "details": fate.get('details')}), 404
 
         receipt = financial_oracle.generate_attestation(token_address, fate)
 
-        # ── Persist prediction for resolution tracking ──────────────────────
         prediction_id = save_prediction(
-            agent_id        = AGENT_ID,
-            prediction_type = "token",
-            subject         = token_address,
-            verdict         = fate.get("verdict", "UNKNOWN"),
-            score           = fate.get("score", 0),
-            raw_data        = fate,
-            attestation_uid = receipt.get("uid", ""),
+            agent_id            = AGENT_ID,
+            prediction_type     = "token",
+            subject             = token_address,
+            verdict             = fate.get("verdict", "UNKNOWN"),
+            score               = fate.get("score", 0),
+            raw_data            = fate,
+            attestation_uid     = receipt.get("uid", ""),
             resolve_after_hours = 24,
         )
         log.info(f"Prediction saved | id={prediction_id[:8]} | token={token_address}")
@@ -109,15 +145,14 @@ def get_social_prophecy():
         fate    = social_oracle.consult_the_spirits(handle)
         receipt = social_oracle.generate_attestation(handle, fate)
 
-        # ── Persist prediction for resolution tracking ──────────────────────
         prediction_id = save_prediction(
-            agent_id        = AGENT_ID,
-            prediction_type = "social",
-            subject         = handle,
-            verdict         = fate.get("verdict", "UNKNOWN"),
-            score           = fate.get("score", 0),
-            raw_data        = fate,
-            attestation_uid = receipt.get("uid", ""),
+            agent_id            = AGENT_ID,
+            prediction_type     = "social",
+            subject             = handle,
+            verdict             = fate.get("verdict", "UNKNOWN"),
+            score               = fate.get("score", 0),
+            raw_data            = fate,
+            attestation_uid     = receipt.get("uid", ""),
             resolve_after_hours = 24,
         )
         log.info(f"Prediction saved | id={prediction_id[:8]} | handle={handle}")
@@ -134,10 +169,7 @@ def get_social_prophecy():
 
 @app.route('/reputation', methods=['GET'])
 def get_reputation():
-    """
-    Public reputation endpoint — queryable by any agent before buying signals.
-    Returns the Oracle's full trust stats.
-    """
+    """Public trust stats — queryable by any agent before buying signals."""
     agent_id = request.args.get('agent_id', AGENT_ID)
     stats    = get_reputation_stats(agent_id)
     return jsonify(stats)
@@ -145,10 +177,7 @@ def get_reputation():
 
 @app.route('/resolve', methods=['POST'])
 def trigger_resolution():
-    """
-    Manually trigger a resolution cycle (useful for testing).
-    In production this runs automatically in the background thread.
-    """
+    """Manually trigger a resolution cycle — useful for testing."""
     results = run_resolution_cycle()
     return jsonify({
         "resolved": len(results),
@@ -168,36 +197,9 @@ def health_check():
     })
 
 
-# ── Background resolution scheduler ──────────────────────────────────────────
-
-def _resolution_loop():
-    """
-    Runs in a daemon thread — checks for due predictions every 5 minutes.
-    Won't block the Flask server from starting.
-    """
-    import time
-    interval = int(os.getenv("RESOLUTION_POLL_SECONDS", "300"))
-    log.info(f"Resolution scheduler started (interval={interval}s)")
-    while True:
-        try:
-            results = run_resolution_cycle()
-            if results:
-                log.info(f"Resolution cycle complete: {len(results)} resolved")
-        except Exception as e:
-            log.error(f"Resolution cycle error: {e}", exc_info=True)
-        time.sleep(interval)
-
-
-def start_resolution_scheduler():
-    t = threading.Thread(target=_resolution_loop, daemon=True, name="resolution-engine")
-    t.start()
-    log.info("Resolution engine thread started.")
-
-
 # ── x402 Payment Middleware ───────────────────────────────────────────────────
 PaymentMiddleware(app, server, routes)
 
-# ── Start ─────────────────────────────────────────────────────────────────────
+# ── Local dev entry point ─────────────────────────────────────────────────────
 if __name__ == '__main__':
-    start_resolution_scheduler()
     app.run(host='0.0.0.0', port=5001, debug=False)
