@@ -17,7 +17,9 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from prophecy_engine  import FinancialProphet
 from social_prophet   import SocialProphet
 from trust_engine     import full_prophecy
-from prediction_store import save_prediction, get_reputation_stats
+from prediction_store import save_prediction, get_reputation_stats, get_conn
+import psycopg2
+import psycopg2.extras
 from resolution_engine import run_resolution_cycle
 from watcher import run_watch_cycle
 
@@ -195,6 +197,82 @@ def get_combined_prophecy():
 
     except Exception as e:
         log.error(f"/combined-prophecy error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/predictions', methods=['GET'])
+def get_predictions():
+    """
+    View all predictions with optional status filter.
+    Useful for monitoring what the watcher has auto-predicted.
+
+    Query params:
+      status=pending|resolved|all  (default: all)
+      limit=N                      (default: 20, max: 100)
+      verdict=BLESSED|MORTAL|CURSED
+    """
+    status  = request.args.get('status',  'all').upper()
+    limit   = min(int(request.args.get('limit', 20)), 100)
+    verdict = request.args.get('verdict', '').upper()
+
+    try:
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+
+                filters = []
+                params  = []
+
+                if status != 'ALL':
+                    filters.append("status = %s")
+                    params.append(status)
+
+                if verdict:
+                    filters.append("verdict = %s")
+                    params.append(verdict)
+
+                where = ("WHERE " + " AND ".join(filters)) if filters else ""
+                params.append(limit)
+
+                cur.execute(f"""
+                    SELECT
+                        id,
+                        subject         AS token_address,
+                        verdict,
+                        score,
+                        status,
+                        created_at,
+                        resolve_after,
+                        resolved_at,
+                        resolution_uid,
+                        attestation_uid
+                    FROM predictions
+                    {where}
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                """, params)
+
+                rows = [dict(r) for r in cur.fetchall()]
+
+                # Summary counts
+                cur.execute("""
+                    SELECT
+                        status,
+                        verdict,
+                        COUNT(*) as count
+                    FROM predictions
+                    GROUP BY status, verdict
+                    ORDER BY status, verdict
+                """)
+                summary = [dict(r) for r in cur.fetchall()]
+
+        return jsonify({
+            "count":       len(rows),
+            "summary":     summary,
+            "predictions": rows,
+        })
+
+    except Exception as e:
+        log.error(f"/predictions error: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
