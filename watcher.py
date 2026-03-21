@@ -1,19 +1,18 @@
 """
 watcher.py
 -----------
-Event-driven token watcher. Listens to Base chain for PairCreated
-events via WebSocket, then pulls DexScreener data and auto-predicts.
+Event-driven + scheduled token watcher for Base chain.
 
-No polling — the blockchain tells us the moment a new token launches.
+Discovery:  GeckoTerminal /networks/base/new_pools (sorted by age)
+Enrichment: DexScreener   /latest/dex/tokens/{addr} (rich metrics)
+Scoring:    Venice AI via prophecy_engine (token + deployer + social)
+Storage:    Postgres via prediction_store
 
-Supported DEXes on Base:
-  - Uniswap V2  (PairCreated)
-  - Uniswap V3  (PoolCreated)
-  - Aerodrome   (PoolCreated) — dominant DEX on Base
-
-Flow:
-  blockchain event → extract token address → wait for DexScreener to index
-  → run full prophecy → save prediction → resolution engine handles the rest
+Two modes:
+  1. WebSocket (real-time) — listens to Base chain PairCreated events
+     Requires ALCHEMY_API_KEY env var
+  2. Scheduled fallback — polls GeckoTerminal every WATCH_INTERVAL_SECONDS
+     Works with no API key
 """
 
 import os
@@ -44,85 +43,75 @@ log = logging.getLogger("watcher")
 AGENT_ID      = os.getenv("AGENT_ID", "34499")
 PRIVATE_KEY   = os.getenv("AGENT_PRIVATE_KEY")
 RESOLVE_HOURS = int(os.getenv("RESOLVE_AFTER_HOURS", "24"))
+WATCH_INTERVAL        = int(os.getenv("WATCH_INTERVAL_SECONDS",    "600"))
+MAX_TOKEN_AGE_HOURS   = float(os.getenv("MAX_TOKEN_AGE_HOURS",     "2"))
+MIN_LIQUIDITY_USD     = float(os.getenv("MIN_LIQUIDITY_USD",        "1000"))
+MAX_PREDICTIONS_CYCLE = int(os.getenv("MAX_PREDICTIONS_PER_CYCLE", "5"))
+MAX_PREDICTIONS_HOUR  = int(os.getenv("MAX_PREDICTIONS_PER_HOUR",  "20"))
+DEXSCREENER_DELAY     = int(os.getenv("DEXSCREENER_INDEX_DELAY",   "90"))
 
-# Base WebSocket RPC — Alchemy or QuickNode recommended for reliability
-# Free public wss also works but may be rate limited
 BASE_WSS = os.getenv(
     "BASE_WSS_URL",
     "wss://base-mainnet.g.alchemy.com/v2/" + os.getenv("ALCHEMY_API_KEY", "demo")
 )
 
-# How long to wait after PairCreated before pulling DexScreener
-# DexScreener needs ~60s to index a new pair
-DEXSCREENER_INDEX_DELAY = int(os.getenv("DEXSCREENER_INDEX_DELAY", "90"))
+# ── Constants ─────────────────────────────────────────────────────────────────
+GECKO_URL = "https://api.geckoterminal.com/api/v2"
+GECKO_HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Accept":     "application/json;version=20230302",
+}
+DEXSCREENER_HEADERS = {'User-Agent': 'Mozilla/5.0'}
 
-# Minimum liquidity before predicting
-MIN_LIQUIDITY_USD = float(os.getenv("MIN_LIQUIDITY_USD", "1000"))
+IGNORE_ADDRESSES = {
+    "0x4200000000000000000000000000000000000006",  # WETH
+    "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",  # USDC
+    "0x50c5725949a6f0c72e6c4a641f24049a917db0cb",  # DAI
+    "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca",  # USDbC
+}
 
-# Max predictions per hour (protect Venice rate limits)
-MAX_PREDICTIONS_PER_HOUR = int(os.getenv("MAX_PREDICTIONS_PER_HOUR", "20"))
-
-# ── Base DEX Factory Contracts ────────────────────────────────────────────────
-# These emit events the moment a new token pair is created
+IGNORE_SYMBOLS = {'USD', 'USDC', 'USDT', 'WETH', 'WBTC', 'DAI', 'USDB'}
 
 FACTORIES = {
-    # Uniswap V2 on Base
     "uniswap_v2": {
-        "address":   "0x8909Dc15e40173Ff4699343b6eB8132c65e18eC",
-        "event":     "PairCreated(address,address,address,uint256)",
-        "topic":     "0x0d3648bd0f6ba80134a33ba9275ac585d9d315f0ad8355cddefde31afa28d0e9",
-        "token_arg": 0,  # first arg is token0
+        "address": "0x8909Dc15e40173Ff4699343b6eB8132c65e18eC",
+        "topic":   "0x0d3648bd0f6ba80134a33ba9275ac585d9d315f0ad8355cddefde31afa28d0e9",
+        "token_arg": 0,
     },
-    # Uniswap V3 on Base
     "uniswap_v3": {
-        "address":   "0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
-        "event":     "PoolCreated(address,address,uint24,int24,address)",
-        "topic":     "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118",
+        "address": "0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
+        "topic":   "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118",
         "token_arg": 0,
     },
-    # Aerodrome (dominant DEX on Base)
     "aerodrome": {
-        "address":   "0x420DD381b31aEf6683db6B902084cB0FFECe40Da",
-        "event":     "PoolCreated(address,address,bool,address,uint256)",
-        "topic":     "0x2128d88d14c80cb081c1252a5acff7a264671bf199ce226b53788fb26065005e",
+        "address": "0x420DD381b31aEf6683db6B902084cB0FFECe40Da",
+        "topic":   "0x2128d88d14c80cb081c1252a5acff7a264671bf199ce226b53788fb26065005e",
         "token_arg": 0,
     },
 }
 
-# Tokens to ignore (WETH, stablecoins — they're always one side of a pair)
-IGNORE_ADDRESSES = {
-    "0x4200000000000000000000000000000000000006",  # WETH on Base
-    "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",  # USDC on Base
-    "0x50c5725949a6f0c72e6c4a641f24049a917db0cb",  # DAI on Base
-    "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca",  # USDbC on Base
-}
-
-# Track predictions per hour for rate limiting
+# Rate limiting state
 _prediction_times: list[float] = []
-_prediction_lock = threading.Lock()
+_prediction_lock  = threading.Lock()
 
-# Oracle instance
+# Oracle
 oracle = FinancialProphet(AGENT_ID, PRIVATE_KEY)
 
 
-# ── Rate limiting ─────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def can_predict() -> bool:
-    """Check if we're under the per-hour prediction limit."""
     with _prediction_lock:
         now = time.time()
-        # Remove predictions older than 1 hour
         global _prediction_times
         _prediction_times = [t for t in _prediction_times if now - t < 3600]
-        return len(_prediction_times) < MAX_PREDICTIONS_PER_HOUR
+        return len(_prediction_times) < MAX_PREDICTIONS_HOUR
 
 
 def record_prediction():
     with _prediction_lock:
         _prediction_times.append(time.time())
 
-
-# ── Already-predicted check ───────────────────────────────────────────────────
 
 def already_predicted(token_address: str) -> bool:
     try:
@@ -138,110 +127,214 @@ def already_predicted(token_address: str) -> bool:
         return False
 
 
-# ── DexScreener with retry ────────────────────────────────────────────────────
-
-def wait_for_dexscreener(token_address: str, max_attempts: int = 6) -> dict | None:
-    """
-    Wait for DexScreener to index the new token then return pair data.
-    Retries with backoff — DexScreener takes 60-120s to index new pairs.
-    """
-    for attempt in range(max_attempts):
-        try:
-            url = f"https://api.dexscreener.com/latest/dex/tokens/{token_address}"
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=10) as r:
-                data  = json.loads(r.read().decode())
-                pairs = [p for p in (data.get('pairs') or []) if p.get('chainId') == 'base']
-                if pairs:
-                    log.info(f"DexScreener indexed {token_address[:10]}... on attempt {attempt + 1}")
-                    return sorted(
-                        pairs,
-                        key=lambda x: float(x.get('liquidity', {}).get('usd', 0) or 0),
-                        reverse=True
-                    )[0]
-        except Exception as e:
-            log.warning(f"DexScreener attempt {attempt + 1} failed: {e}")
-
-        wait = 30 * (attempt + 1)  # 30s, 60s, 90s, 120s, 150s, 180s
-        log.info(f"Waiting {wait}s for DexScreener to index...")
-        time.sleep(wait)
-
-    log.warning(f"DexScreener never indexed {token_address[:10]}... — skipping")
-    return None
+def is_stablecoin(symbol: str) -> bool:
+    return any(kw in symbol.upper() for kw in IGNORE_SYMBOLS)
 
 
-# ── Event processing ──────────────────────────────────────────────────────────
-
-def decode_token_address(log_data: dict, token_arg: int) -> str | None:
-    """
-    Decode a token address from a PairCreated/PoolCreated event log.
-    Topics[1] = token0, topics[2] = token1 for most factory events.
-    """
+def parse_age_hours(created_at: str) -> float:
+    """Parse ISO timestamp and return age in hours."""
     try:
-        topics = log_data.get('topics', [])
-        # token0 is topics[1], token1 is topics[2]
-        idx    = token_arg + 1
-        if len(topics) > idx:
-            raw   = topics[idx]
-            # Pad/strip to get the address (last 20 bytes of 32-byte topic)
-            addr  = '0x' + raw[-40:]
-            return addr.lower()
-        return None
+        dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+        return (datetime.now(timezone.utc) - dt).total_seconds() / 3600
     except Exception:
+        return 0.0
+
+
+# ── GeckoTerminal — discovery ─────────────────────────────────────────────────
+
+def fetch_gecko_new_pools(page: int = 1) -> list[dict]:
+    """
+    Fetch new Base pools from GeckoTerminal sorted by creation time.
+    This is the primary discovery feed — purpose built for new launches.
+    """
+    try:
+        url = (
+            f"{GECKO_URL}/networks/base/new_pools"
+            f"?include=base_token,quote_token&page={page}"
+        )
+        req = urllib.request.Request(url, headers=GECKO_HEADERS)
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read().decode())
+
+        pools    = data.get('data', [])
+        included = {
+            item['id']: item
+            for item in data.get('included', [])
+        }
+
+        results = []
+        for pool in pools:
+            try:
+                attrs = pool.get('attributes', {})
+                rels  = pool.get('relationships', {})
+
+                # Resolve base token
+                base_ref  = rels.get('base_token', {}).get('data', {})
+                base_id   = base_ref.get('id', '')
+                base_info = included.get(base_id, {}).get('attributes', {})
+                token_addr = base_info.get('address', '')
+
+                if not token_addr:
+                    continue
+
+                results.append({
+                    "token_address": token_addr.lower(),
+                    "symbol":        base_info.get('symbol', ''),
+                    "name":          base_info.get('name', ''),
+                    "pool_address":  attrs.get('address', ''),
+                    "price_usd":     float(attrs.get('base_token_price_usd') or 0),
+                    "liquidity_usd": float(attrs.get('reserve_in_usd') or 0),
+                    "volume_24h":    float(
+                        (attrs.get('volume_usd') or {}).get('h24') or 0
+                    ),
+                    "created_at":    attrs.get('pool_created_at', ''),
+                    "buys_24h":  int(
+                        (attrs.get('transactions') or {})
+                        .get('h24', {}).get('buys', 0) or 0
+                    ),
+                    "sells_24h": int(
+                        (attrs.get('transactions') or {})
+                        .get('h24', {}).get('sells', 0) or 0
+                    ),
+                })
+            except Exception as e:
+                log.debug(f"Pool parse error: {e}")
+
+        log.info(f"GeckoTerminal page {page}: {len(results)} Base pools")
+        return results
+
+    except Exception as e:
+        log.error(f"GeckoTerminal fetch error: {e}")
+        return []
+
+
+# ── DexScreener — enrichment ──────────────────────────────────────────────────
+
+def resolve_dexscreener(token_address: str) -> dict | None:
+    """
+    Enrich a token with full DexScreener pair data.
+    GeckoTerminal finds it; DexScreener gives Venice the behavioural signals.
+    """
+    try:
+        url = f"https://api.dexscreener.com/latest/dex/tokens/{token_address}"
+        req = urllib.request.Request(url, headers=DEXSCREENER_HEADERS)
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode())
+        base_pairs = [
+            p for p in (data.get('pairs') or [])
+            if p.get('chainId') == 'base'
+        ]
+        if not base_pairs:
+            return None
+        return sorted(
+            base_pairs,
+            key=lambda x: float(x.get('liquidity', {}).get('usd', 0) or 0),
+            reverse=True
+        )[0]
+    except Exception as e:
+        log.warning(f"DexScreener resolve error for {token_address[:10]}: {e}")
         return None
 
 
-def handle_new_pair_event(event: dict, dex_name: str, token_arg: int):
+def dexscreener_fallback() -> list[dict]:
     """
-    Called when a PairCreated/PoolCreated event is detected.
-    Runs in its own thread so it doesn't block the WebSocket listener.
+    Fallback discovery via DexScreener token-profiles feed
+    if GeckoTerminal is unavailable.
     """
+    pairs = []
     try:
-        token_address = decode_token_address(event, token_arg)
-        if not token_address:
-            return
+        url = "https://api.dexscreener.com/token-profiles/latest/v1"
+        req = urllib.request.Request(url, headers=DEXSCREENER_HEADERS)
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read().decode())
+        entries = data if isinstance(data, list) else []
+        base    = [
+            e for e in entries
+            if e.get('chainId') == 'base'
+            and e.get('tokenAddress')
+            and e.get('tokenAddress').lower() not in IGNORE_ADDRESSES
+        ]
+        log.info(f"DexScreener fallback: {len(base)} Base profiles")
+        for e in base[:10]:
+            pair = resolve_dexscreener(e['tokenAddress'])
+            if pair:
+                pairs.append(pair)
+            time.sleep(0.3)
+    except Exception as e:
+        log.error(f"DexScreener fallback error: {e}")
+    return pairs
 
-        # Skip known tokens (WETH, stablecoins)
-        if token_address in IGNORE_ADDRESSES:
-            # Try the other token in the pair
-            other_arg     = 1 if token_arg == 0 else 0
-            token_address = decode_token_address(event, other_arg)
-            if not token_address or token_address in IGNORE_ADDRESSES:
-                return
 
-        log.info(f"🆕 New pair detected on {dex_name} | token={token_address[:10]}...")
+# ── Main fetch pipeline ───────────────────────────────────────────────────────
 
-        # Check rate limit
-        if not can_predict():
-            log.warning(f"Rate limit reached ({MAX_PREDICTIONS_PER_HOUR}/hr) — queuing {token_address[:10]}...")
-            return
+def fetch_new_base_pairs() -> list[dict]:
+    """
+    Full discovery + enrichment pipeline.
+    1. GeckoTerminal  → new Base pools sorted by creation time
+    2. Filter         → age, liquidity, stablecoins, already predicted
+    3. DexScreener    → enrich with full behavioural signals for Venice
+    """
+    # Pages 1 + 2 = ~40 pools
+    gecko_pools = fetch_gecko_new_pools(1) + fetch_gecko_new_pools(2)
 
-        # Skip if already predicted
-        if already_predicted(token_address):
-            log.debug(f"Already predicted {token_address[:10]}... — skipping")
-            return
+    if not gecko_pools:
+        log.warning("GeckoTerminal empty — using DexScreener fallback")
+        return dexscreener_fallback()
 
-        # Wait for DexScreener to index the token
-        log.info(f"Waiting {DEXSCREENER_INDEX_DELAY}s for DexScreener to index...")
-        time.sleep(DEXSCREENER_INDEX_DELAY)
+    # Filter candidates
+    candidates = []
+    for pool in gecko_pools:
+        addr    = pool.get('token_address', '')
+        symbol  = pool.get('symbol', '')
+        liq     = pool.get('liquidity_usd', 0)
+        created = pool.get('created_at', '')
 
-        # Pull from DexScreener with retry
-        pair_data = wait_for_dexscreener(token_address)
-        if not pair_data:
-            return
+        age_hours = parse_age_hours(created)
 
-        # Check liquidity threshold
-        liquidity = float(pair_data.get('liquidity', {}).get('usd', 0) or 0)
-        if liquidity < MIN_LIQUIDITY_USD:
-            log.info(f"Liquidity ${liquidity:,.0f} below threshold — skipping {token_address[:10]}...")
-            return
+        if age_hours > MAX_TOKEN_AGE_HOURS:
+            continue
+        if liq < MIN_LIQUIDITY_USD:
+            continue
+        if is_stablecoin(symbol):
+            continue
+        if addr in IGNORE_ADDRESSES:
+            continue
+        if already_predicted(addr):
+            log.debug(f"Already predicted {symbol} — skipping")
+            continue
 
-        symbol = pair_data.get('baseToken', {}).get('symbol', token_address[:8])
-        log.info(f"🔮 Running prophecy for {symbol} | liquidity=${liquidity:,.0f} | dex={dex_name}")
+        candidates.append(pool)
 
-        # Full prophecy
-        fate    = oracle.consult_the_stars(token_address)
-        receipt = oracle.generate_attestation(token_address, fate)
+    log.info(f"GeckoTerminal candidates after filter: {len(candidates)}")
+
+    # Enrich with DexScreener
+    pairs = []
+    for pool in candidates[:MAX_PREDICTIONS_CYCLE]:
+        pair = resolve_dexscreener(pool['token_address'])
+        if pair:
+            pairs.append(pair)
+        time.sleep(0.3)
+
+    log.info(f"Enriched {len(pairs)} pairs ready for prophecy")
+    return pairs
+
+
+# ── Auto prediction ───────────────────────────────────────────────────────────
+
+def auto_predict(pair: dict) -> dict | None:
+    """Run a full prophecy on a token and save it to the DB."""
+    token_addr = pair.get('baseToken', {}).get('address', '')
+    symbol     = pair.get('baseToken', {}).get('symbol', '')
+    liquidity  = float(pair.get('liquidity', {}).get('usd', 0) or 0)
+
+    if not token_addr:
+        return None
+
+    log.info(f"🔮 Auto-predicting {symbol} ({token_addr[:10]}...) | liq=${liquidity:,.0f}")
+
+    try:
+        fate    = oracle.consult_the_stars(token_addr)
+        receipt = oracle.generate_attestation(token_addr, fate)
 
         raw_verdict = fate.get('verdict', 'UNKNOWN')
         verdict     = raw_verdict.split(' ')[0] if ' ' in raw_verdict else raw_verdict
@@ -249,181 +342,56 @@ def handle_new_pair_event(event: dict, dex_name: str, token_arg: int):
         prediction_id = save_prediction(
             agent_id            = AGENT_ID,
             prediction_type     = "token",
-            subject             = token_address.lower(),
+            subject             = token_addr.lower(),
             verdict             = verdict,
             score               = fate.get('score', 0) // 100,
             raw_data            = fate,
             attestation_uid     = receipt.get('uid', ''),
             resolve_after_hours = RESOLVE_HOURS,
         )
-
         record_prediction()
 
         log.info(
-            f"✅ AUTO-PREDICTED {symbol} | "
-            f"id={prediction_id[:8]} | "
-            f"verdict={verdict} | "
-            f"score={fate.get('score', 0) // 100} | "
+            f"✅ {symbol} | id={prediction_id[:8]} | verdict={verdict} | "
+            f"score={fate.get('score',0)//100} | "
             f"token={fate.get('token_score')} "
             f"deployer={fate.get('deployer_score')} "
-            f"promoter={fate.get('promoter_score')} | "
-            f"dex={dex_name}"
+            f"promoter={fate.get('promoter_score')}"
         )
-
+        return {
+            "prediction_id":  prediction_id,
+            "token_address":  token_addr,
+            "symbol":         symbol,
+            "verdict":        verdict,
+            "score":          fate.get('score', 0) // 100,
+            "token_score":    fate.get('token_score'),
+            "deployer_score": fate.get('deployer_score'),
+            "promoter_score": fate.get('promoter_score'),
+        }
     except Exception as e:
-        log.error(f"handle_new_pair_event error: {e}", exc_info=True)
+        log.error(f"Auto-predict failed for {symbol}: {e}", exc_info=True)
+        return None
 
 
-# ── WebSocket listener ────────────────────────────────────────────────────────
-
-def listen_for_pairs():
-    """
-    Connect to Base via WebSocket and subscribe to PairCreated/PoolCreated
-    events from all supported DEX factory contracts.
-
-    Uses eth_subscribe with log filters — the chain pushes events to us
-    the moment they're confirmed. No polling needed.
-    """
-    try:
-        import websocket
-    except ImportError:
-        log.error("websocket-client not installed. Run: pip install websocket-client")
-        return
-
-    factory_addresses = [f['address'].lower() for f in FACTORIES.values()]
-    factory_topics    = [f['topic'] for f in FACTORIES.values()]
-
-    # Map topic hash → factory config for fast lookup
-    topic_to_factory  = {f['topic']: (name, f) for name, f in FACTORIES.items()}
-
-    subscribe_msg = json.dumps({
-        "jsonrpc": "2.0",
-        "id":      1,
-        "method":  "eth_subscribe",
-        "params":  [
-            "logs",
-            {
-                "address": factory_addresses,
-                "topics":  [factory_topics],  # OR filter — any of these topics
-            }
-        ]
-    })
-
-    def on_message(ws, message):
-        try:
-            data   = json.loads(message)
-            result = data.get('params', {}).get('result', {})
-            if not result:
-                return
-
-            topics    = result.get('topics', [])
-            if not topics:
-                return
-
-            event_topic = topics[0].lower()
-
-            # Find which factory this event came from
-            matched = None
-            for topic_hash, (name, factory) in topic_to_factory.items():
-                if event_topic == topic_hash.lower():
-                    matched = (name, factory)
-                    break
-
-            if not matched:
-                return
-
-            dex_name, factory = matched
-            log.info(f"📡 Event received from {dex_name} factory")
-
-            # Handle in background thread so listener stays unblocked
-            t = threading.Thread(
-                target = handle_new_pair_event,
-                args   = (result, dex_name, factory['token_arg']),
-                daemon = True,
-            )
-            t.start()
-
-        except Exception as e:
-            log.error(f"WebSocket message error: {e}")
-
-    def on_error(ws, error):
-        log.error(f"WebSocket error: {error}")
-
-    def on_close(ws, close_status, close_msg):
-        log.warning(f"WebSocket closed: {close_status} {close_msg}")
-
-    def on_open(ws):
-        log.info(f"WebSocket connected to Base | subscribing to {len(FACTORIES)} factories...")
-        ws.send(subscribe_msg)
-        log.info("Subscribed to PairCreated/PoolCreated events ✅")
-
-    # Auto-reconnect loop
-    while True:
-        try:
-            log.info(f"Connecting to Base WebSocket: {BASE_WSS[:50]}...")
-            ws = websocket.WebSocketApp(
-                BASE_WSS,
-                on_open    = on_open,
-                on_message = on_message,
-                on_error   = on_error,
-                on_close   = on_close,
-            )
-            ws.run_forever(ping_interval=30, ping_timeout=10)
-        except Exception as e:
-            log.error(f"WebSocket connection failed: {e}")
-
-        log.info("Reconnecting in 15s...")
-        time.sleep(15)
-
-
-# ── Fallback: periodic DexScreener scan ──────────────────────────────────────
+# ── Scheduled scan ────────────────────────────────────────────────────────────
 
 def run_fallback_scan() -> list[dict]:
     """
-    Fallback scan using DexScreener's latest pairs endpoint.
-    Used when WebSocket is unavailable (no Alchemy key etc).
-    Runs every WATCH_INTERVAL_SECONDS.
+    Scheduled scan — called by the background thread and /watch endpoint.
+    Uses GeckoTerminal for discovery + DexScreener for enrichment.
     """
     predictions = []
     try:
-        # Use the same multi-feed approach as fetch_new_base_pairs
-        pairs      = fetch_new_base_pairs()
-        now_ms     = time.time() * 1000
-        candidates = [
-            p for p in pairs
-            if (
-                float(p.get('liquidity', {}).get('usd', 0) or 0) >= MIN_LIQUIDITY_USD and
-                not any(kw in p.get('baseToken', {}).get('symbol', '').upper()
-                        for kw in ['USD', 'USDC', 'USDT', 'WETH', 'WBTC', 'DAI']) and
-                not already_predicted(p.get('baseToken', {}).get('address', ''))
-            )
-        ]
+        pairs = fetch_new_base_pairs()
+        log.info(f"Scan found {len(pairs)} enriched pairs to predict")
 
-        log.info(f"Fallback scan: {len(candidates)} new candidates from {len(pairs)} resolved pairs")
-
-        for pair in candidates[:5]:
+        for pair in pairs:
             if not can_predict():
+                log.warning("Hourly rate limit reached — stopping cycle")
                 break
-
-            token_addr = pair.get('baseToken', {}).get('address', '')
-            fate       = oracle.consult_the_stars(token_addr)
-            receipt    = oracle.generate_attestation(token_addr, fate)
-
-            raw_verdict = fate.get('verdict', 'UNKNOWN')
-            verdict     = raw_verdict.split(' ')[0] if ' ' in raw_verdict else raw_verdict
-
-            pid = save_prediction(
-                agent_id            = AGENT_ID,
-                prediction_type     = "token",
-                subject             = token_addr.lower(),
-                verdict             = verdict,
-                score               = fate.get('score', 0) // 100,
-                raw_data            = fate,
-                attestation_uid     = receipt.get('uid', ''),
-                resolve_after_hours = RESOLVE_HOURS,
-            )
-            record_prediction()
-            predictions.append({"prediction_id": pid, "symbol": pair['baseToken']['symbol'], "verdict": verdict})
+            result = auto_predict(pair)
+            if result:
+                predictions.append(result)
             time.sleep(3)
 
     except Exception as e:
@@ -432,41 +400,141 @@ def run_fallback_scan() -> list[dict]:
     return predictions
 
 
-# ── Public API (called by app.py) ────────────────────────────────────────────
+# ── WebSocket listener ────────────────────────────────────────────────────────
+
+def decode_token_address(log_data: dict, token_arg: int) -> str | None:
+    try:
+        topics = log_data.get('topics', [])
+        idx    = token_arg + 1
+        if len(topics) > idx:
+            return ('0x' + topics[idx][-40:]).lower()
+        return None
+    except Exception:
+        return None
+
+
+def handle_new_pair_event(event: dict, dex_name: str, token_arg: int):
+    """Handle a blockchain PairCreated event in a background thread."""
+    try:
+        token_address = decode_token_address(event, token_arg)
+        if not token_address:
+            return
+        if token_address in IGNORE_ADDRESSES:
+            other = decode_token_address(event, 1 if token_arg == 0 else 0)
+            if not other or other in IGNORE_ADDRESSES:
+                return
+            token_address = other
+
+        log.info(f"📡 {dex_name} PairCreated | token={token_address[:10]}...")
+
+        if not can_predict() or already_predicted(token_address):
+            return
+
+        log.info(f"Waiting {DEXSCREENER_DELAY}s for DexScreener to index...")
+        time.sleep(DEXSCREENER_DELAY)
+
+        pair = resolve_dexscreener(token_address)
+        if not pair:
+            return
+
+        liquidity = float(pair.get('liquidity', {}).get('usd', 0) or 0)
+        if liquidity < MIN_LIQUIDITY_USD:
+            return
+
+        auto_predict(pair)
+
+    except Exception as e:
+        log.error(f"handle_new_pair_event error: {e}", exc_info=True)
+
+
+def listen_for_pairs():
+    """WebSocket listener for real-time Base chain events."""
+    try:
+        import websocket
+    except ImportError:
+        log.error("websocket-client not installed — run: pip install websocket-client")
+        return
+
+    topic_to_factory  = {f['topic']: (name, f) for name, f in FACTORIES.items()}
+    factory_addresses = [f['address'].lower() for f in FACTORIES.values()]
+    factory_topics    = [f['topic'] for f in FACTORIES.values()]
+
+    subscribe_msg = json.dumps({
+        "jsonrpc": "2.0", "id": 1,
+        "method":  "eth_subscribe",
+        "params":  ["logs", {
+            "address": factory_addresses,
+            "topics":  [factory_topics],
+        }]
+    })
+
+    def on_message(ws, message):
+        try:
+            data   = json.loads(message)
+            result = data.get('params', {}).get('result', {})
+            topics = result.get('topics', [])
+            if not topics:
+                return
+            for topic_hash, (name, factory) in topic_to_factory.items():
+                if topics[0].lower() == topic_hash.lower():
+                    threading.Thread(
+                        target=handle_new_pair_event,
+                        args=(result, name, factory['token_arg']),
+                        daemon=True,
+                    ).start()
+                    break
+        except Exception as e:
+            log.error(f"WebSocket message error: {e}")
+
+    def on_error(ws, error): log.error(f"WebSocket error: {error}")
+    def on_close(ws, *_):    log.warning("WebSocket closed")
+    def on_open(ws):
+        ws.send(subscribe_msg)
+        log.info("WebSocket subscribed to Base PairCreated events ✅")
+
+    while True:
+        try:
+            log.info(f"Connecting to Base WebSocket...")
+            websocket.WebSocketApp(
+                BASE_WSS,
+                on_open=on_open, on_message=on_message,
+                on_error=on_error, on_close=on_close,
+            ).run_forever(ping_interval=30, ping_timeout=10)
+        except Exception as e:
+            log.error(f"WebSocket error: {e}")
+        log.info("Reconnecting in 15s...")
+        time.sleep(15)
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
 
 def run_watch_cycle() -> list[dict]:
     """
-    Public entry point called by app.py /watch endpoint and the background thread.
-    Uses WebSocket-based detection if Alchemy key is set, otherwise fallback scan.
-    For manual/scheduled calls, always runs the DexScreener scan directly.
+    Public entry point called by app.py /watch endpoint and background thread.
+    Always runs the GeckoTerminal scan directly.
     """
     return run_fallback_scan()
 
 
-# ── Entry point ─────────────────────────────────────────────────────────────────
-
 def run_forever():
     """
-    Start the watcher. Uses WebSocket if Alchemy key is configured,
-    falls back to periodic DexScreener scan otherwise.
+    Start the watcher. WebSocket if Alchemy key set, scheduled scan otherwise.
     """
     alchemy_key = os.getenv("ALCHEMY_API_KEY")
-
     if alchemy_key and alchemy_key != "demo":
-        log.info("Alchemy key found — using WebSocket event listener (real-time)")
-        listen_for_pairs()  # blocks, auto-reconnects
+        log.info("Alchemy key found — starting WebSocket listener (real-time)")
+        listen_for_pairs()
     else:
-        log.warning(
-            "No ALCHEMY_API_KEY set — falling back to periodic DexScreener scan. "
-            "Add ALCHEMY_API_KEY for real-time event-driven predictions."
+        log.info(
+            "No ALCHEMY_API_KEY — using scheduled GeckoTerminal scan "
+            f"every {WATCH_INTERVAL}s. Add ALCHEMY_API_KEY for real-time events."
         )
-        interval = int(os.getenv("WATCH_INTERVAL_SECONDS", "600"))
         while True:
             try:
                 run_fallback_scan()
             except Exception as e:
-                log.error(f"Fallback scan error: {e}")
-            time.sleep(interval)
+                log.error(f"Scan error: {e}")
+            time.sleep(WATCH_INTERVAL)
 
 
 if __name__ == "__main__":
