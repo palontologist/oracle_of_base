@@ -32,9 +32,7 @@ load_dotenv()
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from prophecy_engine  import FinancialProphet
-# FIX: Import engine instead of get_conn for SQLAlchemy
-from prediction_store import save_prediction, engine
-from sqlalchemy import text
+from prediction_store import save_prediction, get_conn
 
 logging.basicConfig(
     level  = logging.INFO,
@@ -128,13 +126,13 @@ def record_prediction():
 
 def already_predicted(token_address: str) -> bool:
     try:
-        # FIX: Use SQLAlchemy engine connection
-        with engine.connect() as conn:
-            result = conn.execute(
-                text("SELECT 1 FROM predictions WHERE subject = :subject LIMIT 1"),
-                {"subject": token_address.lower()}
-            ).fetchone()
-            return result is not None
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM predictions WHERE subject = %s LIMIT 1",
+                    (token_address.lower(),)
+                )
+                return cur.fetchone() is not None
     except Exception as e:
         log.error(f"DB check error: {e}")
         return False
@@ -253,7 +251,7 @@ def handle_new_pair_event(event: dict, dex_name: str, token_arg: int):
             prediction_type     = "token",
             subject             = token_address.lower(),
             verdict             = verdict,
-            score               = fate.get('score', 0),
+            score               = fate.get('score', 0) // 100,
             raw_data            = fate,
             attestation_uid     = receipt.get('uid', ''),
             resolve_after_hours = RESOLVE_HOURS,
@@ -265,7 +263,10 @@ def handle_new_pair_event(event: dict, dex_name: str, token_arg: int):
             f"✅ AUTO-PREDICTED {symbol} | "
             f"id={prediction_id[:8]} | "
             f"verdict={verdict} | "
-            f"score={fate.get('score', 0)} | "
+            f"score={fate.get('score', 0) // 100} | "
+            f"token={fate.get('token_score')} "
+            f"deployer={fate.get('deployer_score')} "
+            f"promoter={fate.get('promoter_score')} | "
             f"dex={dex_name}"
         )
 
@@ -379,115 +380,51 @@ def listen_for_pairs():
 
 def run_fallback_scan() -> list[dict]:
     """
-    Fallback scan using GeckoTerminal's 'New Pools' endpoint.
-    This is more reliable for finding recent launches than DexScreener's undocumented endpoints.
+    Fallback scan using DexScreener's latest pairs endpoint.
+    Used when WebSocket is unavailable (no Alchemy key etc).
+    Runs every WATCH_INTERVAL_SECONDS.
     """
     predictions = []
     try:
-        # FIX: Use GeckoTerminal for discovery (it has a dedicated new_pools endpoint)
-        url = "https://api.geckoterminal.com/api/v2/networks/base/new_pools"
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        
-        with urllib.request.urlopen(req, timeout=15) as r:
-            data = json.loads(r.read().decode())
-            # GeckoTerminal returns { "data": [ { "attributes": { ... } } ] }
-            pools = data.get('data', [])
+        # Use the same multi-feed approach as fetch_new_base_pairs
+        pairs      = fetch_new_base_pairs()
+        now_ms     = time.time() * 1000
+        candidates = [
+            p for p in pairs
+            if (
+                float(p.get('liquidity', {}).get('usd', 0) or 0) >= MIN_LIQUIDITY_USD and
+                not any(kw in p.get('baseToken', {}).get('symbol', '').upper()
+                        for kw in ['USD', 'USDC', 'USDT', 'WETH', 'WBTC', 'DAI']) and
+                not already_predicted(p.get('baseToken', {}).get('address', ''))
+            )
+        ]
 
-        now_ms = time.time() * 1000
-        candidates = []
-        
-        for p in pools:
-            attr = p.get('attributes', {})
-            
-            # Extract token address (GeckoTerminal gives pool address, we need base token)
-            # Usually the name is "TOKEN / WETH". We might need to fetch details.
-            # Actually, GeckoTerminal provides the pool address. 
-            # We can use the pool address to look up the token on DexScreener.
-            pool_address = attr.get('address')
-            if not pool_address:
-                continue
+        log.info(f"Fallback scan: {len(candidates)} new candidates from {len(pairs)} resolved pairs")
 
-            # 1. Check if already predicted (using pool address as proxy or fetching token)
-            # To be safe, let's fetch the pair data from DexScreener using the pool address
-            # This maps the GeckoTerminal discovery to our DexScreener analysis pipeline.
-            
-            # We skip the "already_predicted" check here because we don't have the token address yet.
-            # We'll do it after fetching from DexScreener.
-
-            # 2. Check Age (GeckoTerminal 'pool_created_at')
-            created_at_str = attr.get('pool_created_at')
-            if created_at_str:
-                # Parse ISO format: 2024-05-20T12:00:00Z
-                try:
-                    dt = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
-                    age_hours = (time.time() - dt.timestamp()) / 3600
-                    if age_hours > 24:
-                        continue
-                except ValueError:
-                    pass # Ignore parsing errors
-
-            candidates.append(pool_address)
-
-        log.info(f"Fallback scan: Found {len(candidates)} new pools on GeckoTerminal")
-
-        # Process the top 5 candidates
-        for pool_addr in candidates[:5]:
+        for pair in candidates[:5]:
             if not can_predict():
                 break
-            
-            # Bridge: GeckoTerminal Pool -> DexScreener Pair
-            # DexScreener can look up by pair address too!
-            url_pair = f"https://api.dexscreener.com/latest/dex/pairs/base/{pool_addr}"
-            try:
-                req_pair = urllib.request.Request(url_pair, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req_pair, timeout=10) as r2:
-                    ds_data = json.loads(r2.read().decode())
-                    pairs = ds_data.get('pairs', [])
-                    
-                if not pairs:
-                    continue
-                    
-                pair_data = pairs[0]
-                token_addr = pair_data.get('baseToken', {}).get('address')
-                
-                if not token_addr or already_predicted(token_addr):
-                    continue
 
-                # Liquidity Check ($100)
-                liquidity = float(pair_data.get('liquidity', {}).get('usd', 0) or 0)
-                if liquidity < 100:
-                    log.info(f"Skipping {token_addr}: Low liquidity (${liquidity:.0f})")
-                    continue
-                
-                # Symbol Check
-                symbol = pair_data.get('baseToken', {}).get('symbol', '?')
-                if any(kw in symbol.upper() for kw in ['USD', 'USDC', 'USDT', 'WETH', 'WBTC', 'DAI']):
-                    continue
+            token_addr = pair.get('baseToken', {}).get('address', '')
+            fate       = oracle.consult_the_stars(token_addr)
+            receipt    = oracle.generate_attestation(token_addr, fate)
 
-                # 🚀 PREDICT
-                fate       = oracle.consult_the_stars(token_addr)
-                receipt    = oracle.generate_attestation(token_addr, fate)
-                
-                raw_verdict = fate.get('verdict', 'UNKNOWN')
-                verdict     = raw_verdict.split(' ')[0] if ' ' in raw_verdict else raw_verdict
+            raw_verdict = fate.get('verdict', 'UNKNOWN')
+            verdict     = raw_verdict.split(' ')[0] if ' ' in raw_verdict else raw_verdict
 
-                pid = save_prediction(
-                    agent_id            = AGENT_ID,
-                    prediction_type     = "token",
-                    subject             = token_addr.lower(),
-                    verdict             = verdict,
-                    score               = fate.get('score', 0),
-                    raw_data            = fate,
-                    attestation_uid     = receipt.get('uid', ''),
-                    resolve_after_hours = RESOLVE_HOURS,
-                )
-                record_prediction()
-                predictions.append({"prediction_id": pid, "symbol": symbol, "verdict": verdict})
-                log.info(f"✅ Fallback Predicted: {symbol} ({pid})")
-                time.sleep(3)
-
-            except Exception as e:
-                log.error(f"Error processing candidate {pool_addr}: {e}")
+            pid = save_prediction(
+                agent_id            = AGENT_ID,
+                prediction_type     = "token",
+                subject             = token_addr.lower(),
+                verdict             = verdict,
+                score               = fate.get('score', 0) // 100,
+                raw_data            = fate,
+                attestation_uid     = receipt.get('uid', ''),
+                resolve_after_hours = RESOLVE_HOURS,
+            )
+            record_prediction()
+            predictions.append({"prediction_id": pid, "symbol": pair['baseToken']['symbol'], "verdict": verdict})
+            time.sleep(3)
 
     except Exception as e:
         log.error(f"Fallback scan error: {e}", exc_info=True)
