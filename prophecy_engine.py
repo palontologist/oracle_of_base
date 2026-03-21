@@ -6,6 +6,9 @@ import os
 import requests
 
 # ERC-8004 Registry Addresses (Base Mainnet)
+# Global semaphore — only one Venice call at a time across all threads
+import threading as _threading
+_venice_lock = _threading.Semaphore(1)
 IDENTITY_REGISTRY   = "0x8004A169FB4a3325136EB29fA0ceB6D2e539a432"
 REPUTATION_REGISTRY = "0x8004BAa17C55a88189AE136b182e5fdA19dE9b63"
 
@@ -273,6 +276,28 @@ class FinancialProphet:
 
     # ── Venice AI — the brain ─────────────────────────────────────────────────
 
+    def _trim_for_venice(self, signals: dict) -> dict:
+        """
+        Keep only the highest-signal keys before sending to Venice.
+        Reduces prompt from ~2000 tokens to ~300 tokens.
+        Faster response, lower cost, same analytical quality.
+        """
+        priority = {
+            # Token signals
+            'symbol', 'liquidity_usd', 'volume_24h', 'fdv',
+            'age_hours', 'is_new', 'buy_ratio_24h',
+            'fdv_liquidity_ratio', 'vol_liquidity_ratio',
+            'price_change_24h', 'price_change_1h',
+            'volume_trend', 'total_txns_24h', 'lp_count',
+            # Deployer signals
+            'deployer_history', 'previous_tokens', 'rugged_count',
+            'thriving_count', 'rug_rate_pct', 'risk_implication',
+            # Promoter signals
+            'social_presence', 'cast_count', 'bot_promoters',
+            'trusted_promoters', 'note',
+        }
+        return {k: v for k, v in signals.items() if k in priority}
+
     def _call_venice(
         self,
         token_signals:    dict,
@@ -300,6 +325,11 @@ class FinancialProphet:
                 "Content-Type":  "application/json"
             }
 
+            # Trim signals to reduce prompt size and speed up Venice
+            token_s    = self._trim_for_venice(token_signals)
+            deployer_s = self._trim_for_venice(deployer_signals)
+            promoter_s = self._trim_for_venice(promoter_signals)
+
             prompt = f"""
 You are The Oracle of Base — an agentic AI analyst that assesses crypto token trust.
 You receive raw signals and reason like an experienced DeFi analyst, not a rules engine.
@@ -309,7 +339,7 @@ Your job: read the signals, spot the patterns, assign independent scores for eac
 ════════════════════════════════════════════
 SIGNAL LAYER 1: TOKEN ON-CHAIN BEHAVIOUR
 ════════════════════════════════════════════
-{json.dumps(token_signals, indent=2)}
+{json.dumps(token_s, indent=2)}
 
 WHAT TO LOOK FOR:
 - Is buy_ratio_24h suspiciously high (>0.85)? Coordinated buying = pump incoming.
@@ -321,7 +351,7 @@ WHAT TO LOOK FOR:
 ════════════════════════════════════════════
 SIGNAL LAYER 2: DEPLOYER TRACK RECORD
 ════════════════════════════════════════════
-{json.dumps(deployer_signals, indent=2)}
+{json.dumps(deployer_s, indent=2)}
 
 WHAT TO LOOK FOR:
 - Unknown deployer (no history) is NOT automatically bad — every deployer starts somewhere.
@@ -333,7 +363,7 @@ WHAT TO LOOK FOR:
 ════════════════════════════════════════════
 SIGNAL LAYER 3: SOCIAL PROMOTION PATTERNS
 ════════════════════════════════════════════
-{json.dumps(promoter_signals, indent=2)}
+{json.dumps(promoter_s, indent=2)}
 
 WHAT TO LOOK FOR:
 - Promoters with high follow_ratio (following >> followers) = bot accounts.
@@ -365,7 +395,7 @@ Return ONLY this exact JSON:
 """
 
             payload = {
-                "model": "qwen3-5-9b",
+                "model": os.getenv("VENICE_MODEL", "grok-41-fast"),
                 "messages": [
                     {
                         "role":    "system",
@@ -373,15 +403,24 @@ Return ONLY this exact JSON:
                     },
                     {"role": "user", "content": prompt}
                 ],
-                "temperature": 0.3,  # Low temp = consistent analytical reasoning
+                "temperature": float(os.getenv("VENICE_TEMPERATURE", "0.9")),
+                "max_tokens":  200,  # scores + verdict only — keep response small and fast
             }
 
-            response = requests.post(
-                "https://api.venice.ai/api/v1/chat/completions",
-                headers=headers, json=payload, timeout=45
-            )
-            response.raise_for_status()
-            result = response.json()['choices'][0]['message']['content']
+            import time as _time
+            acquired = _venice_lock.acquire(timeout=300)  # wait up to 5 min
+            if not acquired:
+                raise TimeoutError("Venice lock wait timed out — too many queued predictions")
+            try:
+                response = requests.post(
+                    "https://api.venice.ai/api/v1/chat/completions",
+                    headers=headers, json=payload,
+                    timeout=int(os.getenv("VENICE_TIMEOUT", "60"))
+                )
+                response.raise_for_status()
+                result = response.json()['choices'][0]['message']['content']
+            finally:
+                _venice_lock.release()
 
             # Strip markdown fences
             if "```json" in result:
