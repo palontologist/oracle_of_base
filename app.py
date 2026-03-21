@@ -157,11 +157,29 @@ def get_combined_prophecy():
       - Social promotion (Farcaster mentions + bot detection)
 
     This is the premium endpoint — $0.05 via x402.
+    Agents with X-Moltbook-Identity header get their karma logged.
     Returns a single unified verdict with confidence score.
     """
     token_address = request.args.get('token')
     if not token_address:
         return jsonify({"error": "Missing 'token'"}), 400
+
+    # ── Moltbook identity check (optional — enriches caller info) ────────
+    caller_info = {}
+    moltbook_token = request.headers.get('X-Moltbook-Identity')
+    if moltbook_token:
+        try:
+            from moltbook_client import verify_identity
+            identity = verify_identity(moltbook_token)
+            if identity.get('agent'):
+                caller_info = {
+                    "moltbook_agent": identity['agent'].get('name'),
+                    "karma":          identity['agent'].get('karma', 0),
+                    "verified":       identity['agent'].get('verified', False),
+                }
+                log.info(f"Moltbook caller: {caller_info['moltbook_agent']} karma={caller_info['karma']}")
+        except Exception as e:
+            log.debug(f"Moltbook identity check skipped: {e}")
 
     try:
         result = full_prophecy(
@@ -193,10 +211,29 @@ def get_combined_prophecy():
         return jsonify({
             **result,
             "prediction_id": prediction_id,
+            **({"caller": caller_info} if caller_info else {}),
         })
 
     except Exception as e:
         log.error(f"/combined-prophecy error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/moltbook/status', methods=['GET'])
+def moltbook_status():
+    """Check Oracle's Moltbook registration and karma status."""
+    try:
+        from moltbook_client import get_status, get_profile
+        status  = get_status()
+        profile = get_profile()
+        return jsonify({
+            "status":  status,
+            "profile": profile,
+            "posting_verdicts": list(
+                os.getenv("MOLTBOOK_POST_VERDICTS", "CURSED").upper().split(",")
+            ),
+        })
+    except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 

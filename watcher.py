@@ -336,8 +336,12 @@ def auto_predict(pair: dict) -> dict | None:
         fate    = oracle.consult_the_stars(token_addr)
         receipt = oracle.generate_attestation(token_addr, fate)
 
+        # Extract clean verdict — strip Venice reason text
+        # e.g. "CURSED (Ancient pair...)" → "CURSED"
         raw_verdict = fate.get('verdict', 'UNKNOWN')
-        verdict     = raw_verdict.split(' ')[0] if ' ' in raw_verdict else raw_verdict
+        verdict     = raw_verdict.split(' ')[0].split('(')[0].strip()
+        if verdict not in ('BLESSED', 'MORTAL', 'CURSED'):
+            verdict = 'UNKNOWN' 
 
         prediction_id = save_prediction(
             agent_id            = AGENT_ID,
@@ -351,19 +355,38 @@ def auto_predict(pair: dict) -> dict | None:
         )
         record_prediction()
 
+        score = fate.get('score', 0) // 100
         log.info(
             f"✅ {symbol} | id={prediction_id[:8]} | verdict={verdict} | "
-            f"score={fate.get('score',0)//100} | "
+            f"score={score} | "
             f"token={fate.get('token_score')} "
             f"deployer={fate.get('deployer_score')} "
             f"promoter={fate.get('promoter_score')}"
         )
+
+        # ── Post to Moltbook autonomously ─────────────────────────────────
+        try:
+            from moltbook_client import post_prediction as mb_post
+            mb_post(
+                symbol         = symbol,
+                verdict        = verdict,
+                score          = score,
+                token_address  = token_addr,
+                reason         = fate.get('details', {}).get('venice_reason', ''),
+                token_score    = fate.get('token_score', 0) or 0,
+                deployer_score = fate.get('deployer_score', 0) or 0,
+                promoter_score = fate.get('promoter_score', 0) or 0,
+                liquidity_usd  = float(pair.get('liquidity', {}).get('usd', 0) or 0),
+            )
+        except Exception as e:
+            log.warning(f"Moltbook post skipped: {e}")
+
         return {
             "prediction_id":  prediction_id,
             "token_address":  token_addr,
             "symbol":         symbol,
             "verdict":        verdict,
-            "score":          fate.get('score', 0) // 100,
+            "score":          score,
             "token_score":    fate.get('token_score'),
             "deployer_score": fate.get('deployer_score'),
             "promoter_score": fate.get('promoter_score'),
