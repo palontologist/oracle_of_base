@@ -310,13 +310,36 @@ def trust_check():
 
 @app.route('/watch', methods=['GET', 'POST'])
 def trigger_watch():
-    """Manually trigger a watch cycle — scans DexScreener for new tokens now."""
-    from watcher import run_watch_cycle as _run_watch_cycle
-    results = _run_watch_cycle()
-    return jsonify({
-        "found":       len(results),
-        "predictions": results,
-    })
+    """
+    Manually trigger a watch cycle.
+    Fires in a background thread and returns immediately —
+    Venice calls take 45s+ per token so the full cycle takes several minutes.
+    Check /predictions afterwards to see new results.
+    """
+    try:
+        from watcher import run_watch_cycle as _run_watch_cycle
+
+        def _bg():
+            try:
+                results = _run_watch_cycle()
+                log.info(f"/watch cycle complete: {len(results)} predicted")
+            except Exception as e:
+                log.error(f"/watch background error: {e}", exc_info=True)
+
+        t = threading.Thread(target=_bg, daemon=True, name="manual-watch")
+        t.start()
+
+        return jsonify({
+            "status":  "started",
+            "message": (
+                "Watch cycle started in background. "
+                "Check /predictions in ~5 minutes for new results."
+            ),
+        })
+
+    except Exception as e:
+        log.error(f"/watch error: {e}", exc_info=True)
+        return jsonify({"error": str(e), "type": type(e).__name__}), 500
 
 
 @app.route('/resolve', methods=['GET', 'POST'])
