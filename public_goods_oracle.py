@@ -98,72 +98,262 @@ class PublicGoodsOracle:
 
     def _collect_token_signals(self, address: str) -> dict:
         """
-        Token-specific signals via DexScreener.
-        Called when address is identified as a token contract.
+        Rich token/ICO signals.
+        Covers market health, holder distribution, contract structure,
+        treasury behaviour, and tokenomics — the signals that tell you
+        whether this is a real project or an exit vehicle.
         """
-        signals = {"address_type": "token_contract"}
+        signals = {"address_type": "token_contract", "address": address}
+
+        # ── DexScreener: market data ──────────────────────────────────────────
         try:
             r = requests.get(
                 f"https://api.dexscreener.com/latest/dex/tokens/{address}",
                 timeout=8
             )
-            if not r.ok:
-                return signals
+            if r.ok:
+                pairs = r.json().get("pairs") or []
+                if pairs:
+                    total_liq     = sum(float(p.get("liquidity",{}).get("usd",0) or 0) for p in pairs)
+                    total_vol_24h = sum(float(p.get("volume",{}).get("h24",0) or 0) for p in pairs)
+                    total_buys    = sum(p.get("txns",{}).get("h24",{}).get("buys",0) or 0 for p in pairs)
+                    total_sells   = sum(p.get("txns",{}).get("h24",{}).get("sells",0) or 0 for p in pairs)
+                    total_txns    = total_buys + total_sells
 
-            pairs = r.json().get("pairs") or []
-            if not pairs:
-                return {**signals, "note": "No trading pairs found on DexScreener"}
+                    main  = sorted(pairs, key=lambda p: float(p.get("liquidity",{}).get("usd",0) or 0), reverse=True)[0]
+                    token = main.get("baseToken", {})
+                    name  = token.get("name", "")
+                    sym   = token.get("symbol", "")
+                    fdv   = float(main.get("fdv", 0) or 0)
+                    mcap  = float(main.get("marketCap", 0) or 0)
+                    pc    = main.get("priceChange", {})
+                    age_ms = main.get("pairCreatedAt", 0) or 0
+                    age_days = round((time.time()*1000 - age_ms) / (1000*86400), 1) if age_ms else None
+                    price_usd = main.get("priceUsd")
 
-            # Aggregate across all pairs
-            total_liq     = sum(float(p.get("liquidity", {}).get("usd", 0) or 0) for p in pairs)
-            total_vol_24h = sum(float(p.get("volume", {}).get("h24", 0) or 0) for p in pairs)
-            total_txns    = sum(
-                (p.get("txns", {}).get("h24", {}).get("buys", 0) or 0) +
-                (p.get("txns", {}).get("h24", {}).get("sells", 0) or 0)
-                for p in pairs
-            )
+                    # Liquidity / FDV ratio — key tokenomics health signal
+                    liq_fdv_ratio = round(total_liq / fdv, 4) if fdv > 0 else None
 
-            # Use the most liquid pair for token metadata
-            main = sorted(pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0), reverse=True)[0]
-            token     = main.get("baseToken", {})
-            name      = token.get("name", "")
-            symbol    = token.get("symbol", "")
-            fdv       = float(main.get("fdv", 0) or 0)
-            price_chg = main.get("priceChange", {})
-            age_ms    = main.get("pairCreatedAt", 0) or 0
-            age_days  = round((time.time() * 1000 - age_ms) / (1000 * 86400), 1) if age_ms else None
+                    # Buy pressure
+                    buy_pressure = round(total_buys / max(total_txns, 1), 3)
 
-            signals.update({
-                "token_name":        name,
-                "token_symbol":      symbol,
-                "total_liquidity_usd": round(total_liq, 2),
-                "volume_24h_usd":    round(total_vol_24h, 2),
-                "transactions_24h":  total_txns,
-                "fdv_usd":           fdv,
-                "pair_count":        len(pairs),
-                "age_days":          age_days,
-                "price_change_1h":   price_chg.get("h1"),
-                "price_change_24h":  price_chg.get("h24"),
-                "liquidity_signal": (
-                    "deep_liquidity"    if total_liq > 1_000_000
-                    else "good_liquidity"  if total_liq > 100_000
-                    else "thin_liquidity"  if total_liq > 10_000
-                    else "very_thin"
-                ),
-                "maturity_signal": (
-                    "established" if age_days and age_days > 180
-                    else "maturing" if age_days and age_days > 30
-                    else "new"      if age_days and age_days > 3
-                    else "brand_new"
-                ),
-                "interpretation": (
-                    f"{name} ({symbol}) — {len(pairs)} trading pair(s). "
-                    f"${total_liq:,.0f} liquidity, ${total_vol_24h:,.0f} 24h volume. "
-                    f"Age: {age_days} days. FDV: ${fdv:,.0f}."
-                ),
-            })
+                    signals.update({
+                        "token_name":          name,
+                        "token_symbol":        sym,
+                        "price_usd":           price_usd,
+                        "market_cap_usd":      round(mcap, 0) if mcap else None,
+                        "fdv_usd":             round(fdv, 0),
+                        "total_liquidity_usd": round(total_liq, 2),
+                        "volume_24h_usd":      round(total_vol_24h, 2),
+                        "buys_24h":            total_buys,
+                        "sells_24h":           total_sells,
+                        "buy_pressure":        buy_pressure,
+                        "pair_count":          len(pairs),
+                        "age_days":            age_days,
+                        "price_change_1h_pct": pc.get("h1"),
+                        "price_change_24h_pct": pc.get("h24"),
+                        "price_change_7d_pct": pc.get("d7") if hasattr(pc, "get") else None,
+                        "liq_to_fdv_ratio":    liq_fdv_ratio,
+                        # Interpretation signals for Venice
+                        "liquidity_health": (
+                            "deep ($1M+)"         if total_liq > 1_000_000
+                            else "good ($100k+)"  if total_liq > 100_000
+                            else "thin ($10k+)"   if total_liq > 10_000
+                            else "very thin (<$10k)"
+                        ),
+                        "maturity": (
+                            "established (6m+)" if age_days and age_days > 180
+                            else "maturing (1-6m)" if age_days and age_days > 30
+                            else "new (<30d)"   if age_days and age_days > 3
+                            else "brand new (<3d)"
+                        ),
+                        "tokenomics_signal": (
+                            "healthy — liquidity well-backed relative to FDV"
+                                if liq_fdv_ratio and liq_fdv_ratio > 0.05
+                            else "stretched — low liquidity vs FDV, exit risk"
+                                if liq_fdv_ratio and liq_fdv_ratio < 0.01
+                            else "moderate"
+                        ),
+                    })
         except Exception as e:
-            signals["error"] = str(e)
+            signals["dexscreener_error"] = str(e)
+
+        # ── Basescan: holder count + top holders ─────────────────────────────
+        try:
+            r = requests.get(
+                f"https://api.basescan.org/api"
+                f"?module=token&action=tokenholderlist"
+                f"&contractaddress={address}&page=1&offset=10",
+                timeout=8
+            )
+            if r.ok:
+                result = r.json().get("result", [])
+                if isinstance(result, list) and result:
+                    # Top holder concentration
+                    quantities = []
+                    for h in result[:10]:
+                        try:
+                            quantities.append(int(h.get("TokenHolderQuantity", 0)))
+                        except Exception:
+                            pass
+
+                    if quantities:
+                        total_supply_in_top10 = sum(quantities)
+                        top1_pct  = round(quantities[0] / max(total_supply_in_top10, 1) * 100, 1)
+                        top3_pct  = round(sum(quantities[:3]) / max(total_supply_in_top10, 1) * 100, 1)
+                        signals["top_holders"] = {
+                            "top1_concentration_pct":  top1_pct,
+                            "top3_concentration_pct":  top3_pct,
+                            "concentration_signal": (
+                                "highly concentrated — top holder controls majority"
+                                    if top1_pct > 50
+                                else "concentrated — top 3 control majority"
+                                    if top3_pct > 60
+                                else "moderately distributed"
+                                    if top3_pct > 30
+                                else "well distributed"
+                            ),
+                        }
+        except Exception as e:
+            log.debug(f"Holder list: {e}")
+
+        # ── Basescan: token transfer activity ────────────────────────────────
+        try:
+            r = requests.get(
+                f"https://api.basescan.org/api"
+                f"?module=account&action=tokentx"
+                f"&contractaddress={address}&page=1&offset=20&sort=desc",
+                timeout=8
+            )
+            if r.ok:
+                txs = r.json().get("result", [])
+                if isinstance(txs, list) and txs:
+                    unique_wallets = len(set([t.get("to","") for t in txs] + [t.get("from","") for t in txs]))
+                    signals["transfer_activity"] = {
+                        "recent_transfers":    len(txs),
+                        "unique_wallets":      unique_wallets,
+                        "last_transfer_age":   txs[0].get("timeStamp") if txs else None,
+                        "activity_note": (
+                            "active trading — many wallets transacting"
+                                if unique_wallets > 15
+                            else "moderate activity"
+                                if unique_wallets > 5
+                            else "low transfer activity — few wallets"
+                        ),
+                    }
+        except Exception as e:
+            log.debug(f"Token transfers: {e}")
+
+        # ── Basescan: verified contract source ───────────────────────────────
+        try:
+            r = requests.get(
+                f"https://api.basescan.org/api"
+                f"?module=contract&action=getsourcecode"
+                f"&address={address}",
+                timeout=8
+            )
+            if r.ok:
+                res = r.json().get("result", [{}])
+                if res and isinstance(res, list):
+                    src = res[0]
+                    cname     = src.get("ContractName","")
+                    verified  = bool(src.get("SourceCode",""))
+                    proxy     = src.get("Proxy","0") == "1"
+                    compiler  = src.get("CompilerVersion","")
+                    abi_str   = src.get("ABI","")
+
+                    # Check for common ICO/token patterns in contract name
+                    cname_lower = cname.lower()
+                    is_governance = any(w in cname_lower for w in ["govern","dao","vote","proposal"])
+                    is_vesting    = any(w in cname_lower for w in ["vest","lock","timelock","cliff"])
+                    is_multisig   = any(w in cname_lower for w in ["multisig","gnosis","safe"])
+                    is_standard   = any(w in cname_lower for w in ["erc20","token","coin"])
+
+                    if cname or verified:
+                        signals["contract_info"] = {
+                            "name":            cname,
+                            "source_verified": verified,
+                            "is_proxy":        proxy,
+                            "compiler":        compiler,
+                            "is_governance":   is_governance,
+                            "is_vesting":      is_vesting,
+                            "is_multisig":     is_multisig,
+                            "is_standard_token": is_standard,
+                            "transparency_note": (
+                                "source verified on Basescan — full transparency"
+                                    if verified
+                                else "source NOT verified — cannot inspect code"
+                            ),
+                        }
+        except Exception as e:
+            log.debug(f"Contract source: {e}")
+
+        # ── CoinGecko: broader market data + project metadata ────────────────
+        try:
+            r = requests.get(
+                f"https://api.coingecko.com/api/v3/coins/base/contract/{address}",
+                timeout=8
+            )
+            if r.ok:
+                cg = r.json()
+                desc = cg.get("description", {}).get("en", "")
+                links = cg.get("links", {})
+                community = cg.get("community_data", {})
+                dev_data  = cg.get("developer_data", {})
+
+                signals["coingecko"] = {
+                    "name":            cg.get("name"),
+                    "symbol":          cg.get("symbol"),
+                    "description":     (desc[:300] + "...") if len(desc) > 300 else desc,
+                    "homepage":        (links.get("homepage") or [""])[0],
+                    "github_repos":    links.get("repos_url", {}).get("github", [])[:2],
+                    "twitter_handle":  links.get("twitter_screen_name"),
+                    "telegram":        links.get("telegram_channel_identifier"),
+                    "coingecko_score": cg.get("coingecko_score"),
+                    "developer_score": cg.get("developer_score"),
+                    "community_score": cg.get("community_score"),
+                    "twitter_followers": community.get("twitter_followers"),
+                    "github_stars":    dev_data.get("stars"),
+                    "github_forks":    dev_data.get("forks"),
+                    "github_commits_4w": dev_data.get("commit_count_4_weeks"),
+                    "categories":      cg.get("categories", [])[:5],
+                    "genesis_date":    cg.get("genesis_date"),
+                    "ico_data":        cg.get("ico_data"),  # ICO raise info if available
+                    "market_cap_rank": cg.get("market_cap_rank"),
+                    "sentiment_up_pct": cg.get("sentiment_votes_up_percentage"),
+                }
+        except Exception as e:
+            log.debug(f"CoinGecko: {e}")
+
+        # ── DeFiLlama: TVL if it's a DeFi protocol token ─────────────────────
+        try:
+            sym = signals.get("token_symbol","").lower()
+            if sym:
+                r = requests.get(
+                    f"https://api.llama.fi/search?query={sym}",
+                    timeout=6
+                )
+                if r.ok:
+                    results = r.json()
+                    if results:
+                        match = results[0]
+                        signals["defillama"] = {
+                            "protocol_name": match.get("name"),
+                            "tvl_usd":       match.get("tvl"),
+                            "chains":        match.get("chains",[])[0:3],
+                            "category":      match.get("category"),
+                        }
+        except Exception:
+            pass
+
+        # ── ENS reverse lookup for token contract ─────────────────────────────
+        try:
+            ens = enrich_address(address)
+            if ens.get("has_ens"):
+                signals["ens"] = ens
+        except Exception:
+            pass
+
         return signals
 
     def _collect_wallet_signals(self, address: str) -> dict:
@@ -231,7 +421,7 @@ class PublicGoodsOracle:
             except Exception:
                 pass
 
-            return {
+            contract_data = {
                 **base,
                 "code_size_bytes":     code_bytes,
                 "base_balance_eth":    base_eth,
@@ -244,14 +434,18 @@ class PublicGoodsOracle:
                     else "small_contract" if code_bytes > 500
                     else "minimal_contract"
                 ),
-                "interpretation": (
+                "note": (
                     f"Deployed contract ({addr_type}). Bytecode: {code_bytes} bytes. "
                     f"Balance: {base_eth} ETH on Base, {eth_eth} ETH on mainnet. "
-                    f"{'Also deployed on Ethereum mainnet.' if on_mainnet else 'Base-only.'} "
-                    f"IMPORTANT: eth_getTransactionCount is always 0 for contracts — "
-                    f"this is not a low-activity signal."
+                    f"{'Also deployed on Ethereum mainnet.' if on_mainnet else 'Base-only.'}"
                 ),
             }
+            try:
+                rich = self._fetch_rich_address_metadata(address)
+                contract_data.update({k: v for k, v in rich.items() if k != "address"})
+            except Exception as e:
+                log.debug(f"Rich contract metadata: {e}")
+            return contract_data
 
         # ── EOA wallet ────────────────────────────────────────────────────────
         base_tx  = int(rpc_call(BASE_RPC_URL, "eth_getTransactionCount", [address, "latest"]), 16)
@@ -259,7 +453,7 @@ class PublicGoodsOracle:
         eth_tx   = int(rpc_call(ETH_RPC_URL,  "eth_getTransactionCount", [address, "latest"]), 16)
         total_tx = base_tx + eth_tx
 
-        return {
+        wallet = {
             **base,
             "base_tx_count":        base_tx,
             "eth_tx_count":         eth_tx,
@@ -276,6 +470,189 @@ class PublicGoodsOracle:
             "cross_chain_presence": eth_tx > 0,
             "has_mainnet_history":  eth_tx > 10,
         }
+
+        # Enrich with rich on-chain metadata
+        try:
+            rich = self._fetch_rich_address_metadata(address)
+            wallet.update({k: v for k, v in rich.items() if k != "address"})
+        except Exception as e:
+            log.debug(f"Rich metadata fetch failed: {e}")
+
+        return wallet
+
+    def _fetch_rich_address_metadata(self, address: str) -> dict:
+        """
+        Pull every useful signal about an address from free public APIs.
+        Goal: give Venice enough to reason about this address as if it
+        were a human analyst with 5 minutes and a browser.
+        """
+        meta = {"address": address}
+
+        # ── Basescan: transaction history ─────────────────────────────────────
+        try:
+            # Normal transactions (last 10)
+            r = requests.get(
+                f"https://api.basescan.org/api"
+                f"?module=account&action=txlist"
+                f"&address={address}&startblock=0&endblock=99999999"
+                f"&page=1&offset=10&sort=desc",
+                timeout=8
+            )
+            if r.ok:
+                data = r.json()
+                txs = data.get("result", [])
+                if isinstance(txs, list) and txs:
+                    meta["recent_txs"] = len(txs)
+                    meta["first_tx_at"] = txs[-1].get("timeStamp")
+                    meta["last_tx_at"]  = txs[0].get("timeStamp")
+                    meta["tx_types"] = list(set([
+                        "contract_deploy" if tx.get("contractAddress") else
+                        "contract_call"   if tx.get("input","0x") != "0x" else
+                        "eth_transfer"
+                        for tx in txs[:5]
+                    ]))
+
+                    # What contracts has this address interacted with?
+                    contracts_called = list(set([
+                        tx.get("to","")[:10]+"..."
+                        for tx in txs
+                        if tx.get("input","0x") != "0x" and tx.get("to")
+                    ]))[:5]
+                    if contracts_called:
+                        meta["contracts_interacted"] = contracts_called
+
+                    # Contracts deployed by this address
+                    deployed = [tx.get("contractAddress") for tx in txs if tx.get("contractAddress")]
+                    if deployed:
+                        meta["contracts_deployed"] = deployed[:5]
+                        meta["has_deployed_contracts"] = True
+        except Exception as e:
+            log.debug(f"Basescan tx fetch: {e}")
+
+        # ── Basescan: ERC-20 token holdings ──────────────────────────────────
+        try:
+            r = requests.get(
+                f"https://api.basescan.org/api"
+                f"?module=account&action=tokentx"
+                f"&address={address}&page=1&offset=10&sort=desc",
+                timeout=8
+            )
+            if r.ok:
+                data = r.json()
+                txs  = data.get("result", [])
+                if isinstance(txs, list) and txs:
+                    tokens_held = list(set([
+                        tx.get("tokenSymbol", "")
+                        for tx in txs
+                        if tx.get("tokenSymbol")
+                    ]))[:10]
+                    meta["token_interactions"] = tokens_held
+                    meta["defi_active"] = any(
+                        t in ["USDC","USDT","WETH","DAI","cbETH","cbBTC"]
+                        for t in tokens_held
+                    )
+        except Exception as e:
+            log.debug(f"Basescan token fetch: {e}")
+
+        # ── If it's a contract: get verified source info ─────────────────────
+        if meta.get("has_deployed_contracts") or meta.get("address_type") == "generic_contract":
+            try:
+                r = requests.get(
+                    f"https://api.basescan.org/api"
+                    f"?module=contract&action=getsourcecode"
+                    f"&address={address}",
+                    timeout=8
+                )
+                if r.ok:
+                    result = r.json().get("result", [{}])
+                    if result and isinstance(result, list):
+                        src = result[0]
+                        contract_name = src.get("ContractName","")
+                        compiler      = src.get("CompilerVersion","")
+                        verified      = bool(src.get("SourceCode",""))
+                        if contract_name:
+                            meta["contract_name"] = contract_name
+                            meta["source_verified"] = verified
+                            meta["compiler"] = compiler
+            except Exception as e:
+                log.debug(f"Contract source fetch: {e}")
+
+        # ── DeFiLlama: protocol check ─────────────────────────────────────────
+        try:
+            r = requests.get(
+                "https://api.llama.fi/protocols",
+                timeout=8
+            )
+            if r.ok:
+                protocols = r.json()
+                # Check if this address appears in any known protocol
+                addr_lower = address.lower()
+                for p in protocols[:500]:  # check top 500
+                    chains = p.get("chains", [])
+                    addr_in_protocol = any(
+                        addr_lower in str(p.get("address","")).lower() or
+                        addr_lower in str(p.get("forkedFrom","")).lower()
+                        for _ in [1]
+                    )
+                    if addr_in_protocol:
+                        meta["defillama_protocol"] = {
+                            "name":     p.get("name"),
+                            "category": p.get("category"),
+                            "tvl":      p.get("tvl"),
+                            "chains":   chains[:3],
+                        }
+                        break
+        except Exception as e:
+            log.debug(f"DeFiLlama check: {e}")
+
+        # ── NFT holdings (OpenSea Base) ───────────────────────────────────────
+        try:
+            r = requests.get(
+                f"https://api.opensea.io/api/v2/chain/base/account/{address}/nfts"
+                f"?limit=5",
+                headers={"accept": "application/json"},
+                timeout=6
+            )
+            if r.ok:
+                nfts = r.json().get("nfts", [])
+                if nfts:
+                    collections = list(set([n.get("collection","") for n in nfts if n.get("collection")]))[:5]
+                    meta["nft_collections"] = collections
+                    meta["has_nfts"] = True
+        except Exception:
+            pass
+
+        # ── Coinbase Verifications (on-chain identity) ────────────────────────
+        try:
+            # Coinbase Verified ID is an EAS attestation on Base
+            # Check via Base name service (basename)
+            r = requests.get(
+                f"https://api.basename.app/v1/address/{address}",
+                timeout=6
+            )
+            if r.ok:
+                data = r.json()
+                basename = data.get("name")
+                if basename:
+                    meta["basename"] = basename
+                    meta["has_basename"] = True
+        except Exception:
+            pass
+
+        # ── Gitcoin Passport score ────────────────────────────────────────────
+        try:
+            r = requests.get(
+                f"https://api.scorer.gitcoin.co/ceramic-cache/stamp/{address}",
+                timeout=6
+            )
+            if r.ok:
+                stamps = r.json()
+                if stamps:
+                    meta["gitcoin_stamps"] = len(stamps) if isinstance(stamps, list) else 1
+        except Exception:
+            pass
+
+        return meta
 
     def _collect_contributor_signals(self, addresses: list[str]) -> dict:
         """
