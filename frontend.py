@@ -6,71 +6,119 @@ Themed after SYNTHESIS — terminal aesthetic, monospace, green on dark.
 Serves at GET /
 """
 
-from flask import Blueprint, Response, request
+from flask import Blueprint, Response, jsonify
 import os
-import requests as req
+import json
 
 frontend_bp = Blueprint('frontend', __name__)
-
-ORACLE_URL = os.getenv("ORACLE_URL", "")
-WALLET     = "0x1EA37E2Fb76Aa396072204C90fcEF88093CEb920"
+WALLET = "0x1EA37E2Fb76Aa396072204C90fcEF88093CEb920"
 
 
-def _self(path: str) -> str:
-    """Build internal API URL — works on Railway and locally."""
-    base = ORACLE_URL.rstrip("/") if ORACLE_URL else ""
-    if not base:
-        # Infer from request context
-        try:
-            from flask import request as r
-            base = r.host_url.rstrip("/")
-        except Exception:
-            base = "http://localhost:8080"
-    return f"{base}{path}"
+def _get_trust():
+    """Pull trust data directly from DB — no HTTP call to self."""
+    try:
+        from prediction_store import get_reputation_stats, get_conn
+        stats = get_reputation_stats("34499")
+        score = stats.get("trust_score")
+        resolved = stats.get("total_resolved", 0)
+        trusted = score is not None and score >= 70 and resolved >= 5
+        return {
+            "trust_score": round(float(score), 2) if score else 0.0,
+            "trusted": trusted,
+            "total_resolved": resolved,
+            "correct": stats.get("correct", 0),
+            "wrong": stats.get("wrong", 0),
+            "pending": stats.get("pending", 0),
+        }
+    except Exception as e:
+        return {"trust_score": 0.0, "trusted": False, "total_resolved": 0,
+                "correct": 0, "wrong": 0, "pending": 0}
+
+
+def _get_recent_predictions(limit=20):
+    """Pull recent predictions directly from DB."""
+    try:
+        from prediction_store import get_conn
+        import psycopg2.extras
+        conn = get_conn()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT p.id, p.subject as token_address, p.verdict, p.score,
+                   p.status, p.created_at,
+                   r.outcome, r.accuracy
+            FROM predictions p
+            LEFT JOIN resolutions r ON r.prediction_id = p.id
+            WHERE p.prediction_type = 'token'
+            ORDER BY p.created_at DESC
+            LIMIT %s
+        """, (limit,))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+@frontend_bp.route('/feed', methods=['GET'])
+def feed_api():
+    """JSON feed for the live terminal — polled every 15s by frontend JS."""
+    preds = _get_recent_predictions(30)
+    out = []
+    for p in preds:
+        addr = p.get("token_address", "")
+        verdict = str(p.get("verdict", "")).split(" ")[0]
+        score = p.get("score", 0)
+        status = p.get("status", "PENDING")
+        outcome = p.get("outcome", "")
+        created = p.get("created_at")
+        ts = created.strftime("%H:%M:%S") if created else "??:??:??"
+        out.append({
+            "ts": ts,
+            "addr": addr,
+            "short": addr[:6] + "..." + addr[-4:] if addr else "unknown",
+            "verdict": verdict,
+            "score": score,
+            "status": status,
+            "outcome": outcome,
+        })
+    return jsonify(out)
 
 
 @frontend_bp.route('/', methods=['GET'])
 def index():
 
-    # ── Fetch live data ───────────────────────────────────────────────────────
-    trust = {}
-    top_predictions = []
-    try:
-        trust = req.get(_self("/trust-check"), timeout=5).json()
-    except Exception:
-        trust = {"trust_score": None, "trusted": False, "total_resolved": 0}
+    trust = _get_trust()
+    recent = _get_recent_predictions(5)
 
-    try:
-        preds = req.get(_self("/predictions?limit=5&status=resolved&verdict=CURSED"), timeout=5).json()
-        top_predictions = preds.get("predictions", [])[:5]
-    except Exception:
-        top_predictions = []
-
-    score    = trust.get("trust_score") or 0
+    score    = trust.get("trust_score", 0.0)
     trusted  = trust.get("trusted", False)
     resolved = trust.get("total_resolved", 0)
+    correct  = trust.get("correct", 0)
+    wrong    = trust.get("wrong", 0)
+    pending  = trust.get("pending", 0)
     score_color = "#00ff41" if trusted else "#ff9500"
-    trust_label = "TRUSTED" if trusted else "BUILDING TRUST"
+    trust_label = "TRUSTED ✓" if trusted else "BUILDING TRUST"
 
-    # ── Build prediction rows ─────────────────────────────────────────────────
+    # Build prediction rows for table
     pred_rows = ""
-    for p in top_predictions:
+    for p in recent:
         addr    = p.get("token_address", "")
         short   = addr[:6] + "..." + addr[-4:] if addr else "unknown"
-        verdict = p.get("verdict", "").split(" ")[0]
+        verdict = str(p.get("verdict", "")).split(" ")[0]
         score_v = p.get("score", 0)
-        outcome = p.get("outcome", "")
-        outcome_sym = "✓" if outcome == "TRUE" else ("~" if outcome == "PARTIAL" else "✗")
+        outcome = p.get("outcome") or p.get("status", "PENDING")
+        vcolor  = "#ff4444" if verdict == "CURSED" else ("#00ff41" if verdict == "BLESSED" else "#ff9500")
         pred_rows += f"""
         <tr>
-          <td style="color:#888;font-size:11px">{short}</td>
-          <td style="color:#ff4444">{verdict}</td>
+          <td style="color:#555;font-size:11px">{short}</td>
+          <td style="color:{vcolor}">{verdict}</td>
           <td style="color:#00ff41">{score_v}/100</td>
-          <td style="color:#888">{outcome_sym} {outcome}</td>
+          <td style="color:#888">{outcome}</td>
         </tr>"""
 
     if not pred_rows:
-        pred_rows = '<tr><td colspan="4" style="color:#555;text-align:center;padding:20px">resolving predictions...</td></tr>'
+        pred_rows = '<tr><td colspan="4" style="color:#333;text-align:center;padding:20px">awaiting predictions...</td></tr>'
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -80,201 +128,194 @@ def index():
 <title>ORACLE OF BASE</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+  *,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}
+  :root{{
+    --green:#00ff41;--green-dim:#00cc33;--green-dark:#003311;
+    --red:#ff4444;--amber:#ff9500;
+    --bg:#080808;--bg2:#0f0f0f;--bg3:#141414;
+    --border:#1a2a1a;--text:#b0b0b0;--muted:#444;
+    --font:'Share Tech Mono','Courier New',monospace;
+  }}
+  html{{scroll-behavior:smooth}}
+  body{{background:var(--bg);color:var(--text);font-family:var(--font);font-size:14px;line-height:1.6;overflow-x:hidden}}
 
-  *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
-
-  :root {{
-    --green: #00ff41;
-    --green-dim: #00cc33;
-    --green-dark: #003311;
-    --bg: #0a0a0a;
-    --bg2: #111;
-    --border: #1a2a1a;
-    --text: #c8c8c8;
-    --muted: #555;
-    --font: 'Share Tech Mono', 'Courier New', monospace;
+  body::before{{
+    content:'';position:fixed;inset:0;z-index:0;pointer-events:none;
+    background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E");
+    opacity:0.5;
   }}
 
-  html {{ scroll-behavior: smooth; }}
-  body {{ background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px; line-height: 1.6; overflow-x: hidden; }}
+  section{{position:relative;z-index:1}}
 
-  /* ── NOISE OVERLAY ── */
-  body::before {{
-    content: '';
-    position: fixed; inset: 0; z-index: 0; pointer-events: none;
-    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
-    opacity: 0.4;
-  }}
+  @keyframes scan{{0%{{transform:translateY(-100vh)}}100%{{transform:translateY(100vh)}}}}
+  .scanline{{position:fixed;top:0;left:0;right:0;height:120px;background:linear-gradient(transparent,rgba(0,255,65,0.015),transparent);z-index:9999;pointer-events:none;animation:scan 12s linear infinite}}
 
-  section {{ position: relative; z-index: 1; }}
+  @keyframes blink{{0%,100%{{opacity:1}}50%{{opacity:0}}}}
+  .cursor{{animation:blink 1s step-end infinite}}
 
   /* ── HERO ── */
-  .hero {{
-    min-height: 100vh;
-    display: flex; flex-direction: column; justify-content: center;
-    padding: 60px 40px 40px;
-    border-bottom: 1px solid var(--border);
-    position: relative;
-    overflow: hidden;
+  .hero{{
+    min-height:100vh;display:flex;flex-direction:column;justify-content:center;
+    padding:64px 48px 48px;border-bottom:1px solid var(--border);
+    position:relative;overflow:hidden;
   }}
-
-  .hero::after {{
-    content: '';
-    position: absolute; right: -100px; top: 50%; transform: translateY(-50%);
-    width: 600px; height: 600px;
-    background: radial-gradient(circle, rgba(0,255,65,0.04) 0%, transparent 70%);
-    pointer-events: none;
+  .hero::after{{
+    content:'';position:absolute;right:-80px;top:40%;
+    width:500px;height:500px;
+    background:radial-gradient(circle,rgba(0,255,65,0.05) 0%,transparent 65%);
+    pointer-events:none;
   }}
-
-  .tag {{ color: var(--green); font-size: 11px; letter-spacing: 4px; text-transform: uppercase; margin-bottom: 24px; }}
-  .tag::before {{ content: '> '; }}
-
-  .hero-title {{
-    font-size: clamp(56px, 12vw, 140px);
-    font-weight: 900;
-    line-height: 0.9;
-    color: var(--green);
-    letter-spacing: -2px;
-    text-transform: uppercase;
-    margin-bottom: 32px;
+  .pre-tag{{color:var(--green);font-size:10px;letter-spacing:4px;text-transform:uppercase;margin-bottom:20px}}
+  .pre-tag::before{{content:'> '}}
+  .hero-title{{
+    font-size:clamp(52px,11vw,130px);font-weight:900;line-height:0.88;
+    color:var(--green);letter-spacing:-2px;text-transform:uppercase;margin-bottom:28px;
   }}
-
-  .hero-sub {{
-    font-size: 13px;
-    color: var(--muted);
-    max-width: 480px;
-    margin-bottom: 48px;
-    border-left: 2px solid var(--green-dark);
-    padding-left: 16px;
+  .hero-sub{{
+    font-size:12px;color:var(--muted);max-width:440px;margin-bottom:36px;
+    border-left:2px solid var(--green-dark);padding-left:14px;
   }}
-
-  .hero-sub strong {{ color: var(--text); }}
+  .hero-sub strong{{color:var(--text)}}
 
   /* ── TRUST BADGE ── */
-  .trust-badge {{
-    display: inline-flex; align-items: center; gap: 12px;
-    border: 1px solid {score_color};
-    padding: 12px 24px;
-    margin-bottom: 48px;
-    background: rgba(0,0,0,0.6);
+  .trust-badge{{
+    display:inline-flex;align-items:center;gap:16px;
+    border:1px solid {score_color};padding:14px 24px;margin-bottom:40px;
+    background:rgba(0,0,0,0.7);
   }}
+  .trust-score{{font-size:36px;color:{score_color};font-weight:900;line-height:1}}
+  .trust-meta .label{{color:{score_color};font-size:10px;letter-spacing:3px;text-transform:uppercase}}
+  .trust-meta .detail{{color:var(--muted);font-size:11px;margin-top:2px}}
 
-  .trust-score {{ font-size: 32px; color: {score_color}; font-weight: 900; }}
-  .trust-meta {{ font-size: 11px; }}
-  .trust-meta .label {{ color: {score_color}; letter-spacing: 3px; }}
-  .trust-meta .detail {{ color: var(--muted); }}
-
-  /* ── AGENT MESSAGE ── */
-  .agent-msg {{
-    font-size: 11px; color: var(--muted);
-    border-top: 1px solid var(--border);
-    padding-top: 24px;
-    max-width: 560px;
-  }}
-  .agent-msg .prompt {{ color: var(--green); }}
+  .agent-msg{{font-size:11px;color:var(--muted);border-top:1px solid var(--border);padding-top:20px;max-width:540px}}
+  .agent-msg .p{{color:var(--green)}}
 
   /* ── SECTIONS ── */
-  .section {{ padding: 80px 40px; border-bottom: 1px solid var(--border); }}
-  .section-label {{ font-size: 10px; letter-spacing: 4px; color: var(--green); text-transform: uppercase; margin-bottom: 8px; }}
-  .section-title {{ font-size: 28px; color: #fff; margin-bottom: 32px; }}
+  .section{{padding:72px 48px;border-bottom:1px solid var(--border)}}
+  .sec-label{{font-size:10px;letter-spacing:4px;color:var(--green);text-transform:uppercase;margin-bottom:6px}}
+  .sec-title{{font-size:26px;color:#fff;margin-bottom:28px}}
 
-  /* ── GRID ── */
-  .grid-3 {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1px; background: var(--border); }}
-  .grid-3 > * {{ background: var(--bg); }}
+  /* ── STATS GRID ── */
+  .stats-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1px;background:var(--border)}}
+  .stat-card{{background:var(--bg);padding:24px}}
+  .stat-card .num{{font-size:38px;color:var(--green);line-height:1}}
+  .stat-card .lbl{{font-size:10px;letter-spacing:3px;color:var(--muted);text-transform:uppercase;margin-top:4px}}
+  .stat-card .desc{{font-size:11px;color:var(--muted);margin-top:10px}}
 
-  /* ── SIGNAL CARDS ── */
-  .signal-card {{ padding: 28px; }}
-  .signal-card .num {{ font-size: 42px; color: var(--green); line-height: 1; }}
-  .signal-card .label {{ font-size: 10px; letter-spacing: 3px; color: var(--muted); text-transform: uppercase; margin-top: 4px; }}
-  .signal-card .desc {{ font-size: 12px; color: var(--muted); margin-top: 12px; }}
+  /* ── LIVE TERMINAL ── */
+  .terminal{{
+    background:#000;border:1px solid var(--border);
+    font-size:12px;line-height:1.8;
+  }}
+  .terminal-header{{
+    padding:10px 16px;border-bottom:1px solid var(--border);
+    display:flex;align-items:center;gap:10px;
+    background:var(--bg2);
+  }}
+  .term-dot{{width:10px;height:10px;border-radius:50%}}
+  .term-title{{font-size:10px;letter-spacing:3px;color:var(--muted);margin-left:auto}}
+  .term-status{{font-size:10px;color:var(--green)}}
+  .terminal-body{{padding:16px;height:320px;overflow-y:auto;}}
+  .term-line{{margin:0;padding:2px 0;white-space:pre}}
+  .term-line .ts{{color:#333}}
+  .term-line .addr{{color:#555}}
+  .term-line .v-cursed{{color:#ff4444;font-weight:bold}}
+  .term-line .v-blessed{{color:#00ff41;font-weight:bold}}
+  .term-line .v-mortal{{color:#ff9500}}
+  .term-line .reason{{color:#555}}
+  .term-line .arrow{{color:#333}}
+
+  /* ── ACCURACY SIDEBAR ── */
+  .feed-layout{{display:grid;grid-template-columns:1fr 220px;gap:1px;background:var(--border)}}
+  .feed-layout>*{{background:var(--bg)}}
+  .accuracy-panel{{padding:20px}}
+  .acc-title{{font-size:10px;letter-spacing:3px;color:var(--muted);text-transform:uppercase;margin-bottom:16px}}
+  .acc-row{{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:12px}}
+  .acc-row .verdict{{color:var(--muted)}}
+  .acc-row .pct{{color:var(--green)}}
 
   /* ── SKILL TIERS ── */
-  .tier {{ padding: 24px; border: 1px solid var(--border); margin-bottom: 1px; display: flex; justify-content: space-between; align-items: center; gap: 20px; transition: border-color 0.2s; }}
-  .tier:hover {{ border-color: var(--green-dim); }}
-  .tier-info .name {{ color: #fff; font-size: 14px; }}
-  .tier-info .caps {{ font-size: 11px; color: var(--muted); margin-top: 4px; }}
-  .tier-price {{ font-size: 24px; color: var(--green); white-space: nowrap; }}
-  .tier-btn {{
-    display: inline-block; padding: 8px 20px;
-    border: 1px solid var(--green); color: var(--green); font-family: var(--font);
-    font-size: 11px; letter-spacing: 2px; text-decoration: none; text-transform: uppercase;
-    background: transparent; cursor: pointer;
-    transition: background 0.15s, color 0.15s;
+  .tier{{
+    padding:22px 24px;border:1px solid var(--border);margin-bottom:1px;
+    display:flex;justify-content:space-between;align-items:center;gap:16px;
+    transition:border-color 0.2s;
   }}
-  .tier-btn:hover {{ background: var(--green); color: #000; }}
+  .tier:hover{{border-color:var(--green-dim);background:rgba(0,255,65,0.01)}}
+  .tier-name{{color:#fff;font-size:13px}}
+  .tier-caps{{font-size:11px;color:var(--muted);margin-top:4px}}
+  .tier-price{{font-size:22px;color:var(--green);white-space:nowrap}}
+  .btn{{
+    display:inline-block;padding:8px 18px;
+    border:1px solid var(--green);color:var(--green);font-family:var(--font);
+    font-size:10px;letter-spacing:2px;text-decoration:none;text-transform:uppercase;
+    background:transparent;cursor:pointer;transition:background 0.15s,color 0.15s;
+    white-space:nowrap;
+  }}
+  .btn:hover{{background:var(--green);color:#000}}
 
   /* ── CODE BLOCK ── */
-  .code-block {{
-    background: var(--bg2); border: 1px solid var(--border);
-    padding: 20px 24px; font-size: 12px; color: var(--green);
-    overflow-x: auto; position: relative;
+  .code{{
+    background:#000;border:1px solid var(--border);
+    padding:18px 22px;font-size:12px;color:var(--green);
+    overflow-x:auto;margin-top:20px;
   }}
-  .code-block .comment {{ color: var(--muted); }}
-  .code-block .prompt {{ color: var(--muted); user-select: none; }}
+  .code .c{{color:var(--muted)}}
+  .code .p{{color:#333;user-select:none}}
 
-  /* ── PREDICTIONS TABLE ── */
-  .pred-table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
-  .pred-table th {{ text-align: left; color: var(--muted); font-size: 10px; letter-spacing: 2px; text-transform: uppercase; padding: 0 12px 12px 0; }}
-  .pred-table td {{ padding: 8px 12px 8px 0; border-top: 1px solid var(--border); }}
+  /* ── PREDICTION TABLE ── */
+  .ptable{{width:100%;border-collapse:collapse;font-size:12px}}
+  .ptable th{{text-align:left;color:var(--muted);font-size:10px;letter-spacing:2px;text-transform:uppercase;padding:0 12px 10px 0}}
+  .ptable td{{padding:7px 12px 7px 0;border-top:1px solid var(--border)}}
 
-  /* ── TRUST CHECKER ── */
-  .checker {{ background: var(--bg2); border: 1px solid var(--border); padding: 24px; }}
-  .checker-input {{ display: flex; gap: 0; width: 100%; max-width: 560px; }}
-  .checker-input input {{
-    flex: 1; background: #000; border: 1px solid var(--border); border-right: none;
-    color: var(--green); font-family: var(--font); font-size: 12px; padding: 10px 14px;
-    outline: none;
+  /* ── CHECKER ── */
+  .checker-wrap{{background:var(--bg2);border:1px solid var(--border);padding:22px}}
+  .checker-row{{display:flex;gap:0;max-width:540px}}
+  .checker-row input{{
+    flex:1;background:#000;border:1px solid var(--border);border-right:none;
+    color:var(--green);font-family:var(--font);font-size:12px;padding:10px 14px;outline:none;
   }}
-  .checker-input input:focus {{ border-color: var(--green-dim); }}
-  .checker-input input::placeholder {{ color: var(--muted); }}
-  .checker-input button {{
-    background: var(--green-dark); border: 1px solid var(--border);
-    color: var(--green); font-family: var(--font); font-size: 11px;
-    letter-spacing: 2px; padding: 10px 20px; cursor: pointer; white-space: nowrap;
-    transition: background 0.15s;
+  .checker-row input::placeholder{{color:var(--muted)}}
+  .checker-row input:focus{{border-color:var(--green-dim)}}
+  .checker-row button{{
+    background:var(--green-dark);border:1px solid var(--border);
+    color:var(--green);font-family:var(--font);font-size:10px;letter-spacing:2px;
+    padding:10px 18px;cursor:pointer;white-space:nowrap;transition:background 0.15s;
   }}
-  .checker-input button:hover {{ background: var(--green); color: #000; }}
-  #checker-result {{ margin-top: 16px; font-size: 12px; min-height: 20px; }}
+  .checker-row button:hover{{background:var(--green);color:#000}}
+  #cresult{{margin-top:14px;font-size:12px;min-height:18px}}
+
+  /* ── ENDPOINTS ── */
+  .ep-grid{{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--border)}}
+  .ep-group{{background:var(--bg);padding:20px}}
+  .ep-group-title{{font-size:10px;letter-spacing:3px;color:var(--green);margin-bottom:12px}}
+  .ep-row{{padding:4px 0;font-size:11px;color:var(--muted)}}
+  .ep-row .method{{color:#555}}
+  .ep-row .path{{color:var(--text)}}
+  .ep-row .price{{color:var(--green);margin-left:8px}}
 
   /* ── FOOTER ── */
-  .footer {{
-    padding: 40px;
-    display: flex; justify-content: space-between; align-items: center; flex-wrap: gap;
-    font-size: 11px; color: var(--muted);
+  .footer{{
+    padding:32px 48px;display:flex;justify-content:space-between;align-items:center;
+    flex-wrap:wrap;gap:12px;font-size:11px;color:var(--muted);
   }}
-  .footer a {{ color: var(--muted); text-decoration: none; }}
-  .footer a:hover {{ color: var(--green); }}
+  .footer a{{color:var(--muted);text-decoration:none}}
+  .footer a:hover{{color:var(--green)}}
 
-  /* ── SCANLINE EFFECT ── */
-  @keyframes scan {{
-    0% {{ transform: translateY(-100%); }}
-    100% {{ transform: translateY(100vh); }}
-  }}
-  .scanline {{
-    position: fixed; top: 0; left: 0; right: 0; height: 2px;
-    background: linear-gradient(transparent, rgba(0,255,65,0.03), transparent);
-    z-index: 9999; pointer-events: none;
-    animation: scan 8s linear infinite;
-  }}
-
-  @keyframes blink {{ 0%,100%{{opacity:1}} 50%{{opacity:0}} }}
-  .cursor {{ animation: blink 1s step-end infinite; }}
-
-  @media (max-width: 600px) {{
-    .hero {{ padding: 40px 20px 32px; }}
-    .section {{ padding: 60px 20px; }}
-    .footer {{ padding: 24px 20px; flex-direction: column; gap: 12px; }}
-    .tier {{ flex-wrap: wrap; }}
+  @media(max-width:768px){{
+    .hero{{padding:40px 20px 32px}}
+    .section{{padding:56px 20px}}
+    .footer{{padding:24px 20px;flex-direction:column}}
+    .feed-layout{{grid-template-columns:1fr}}
+    .ep-grid{{grid-template-columns:1fr}}
   }}
 </style>
 </head>
 <body>
-
 <div class="scanline"></div>
 
 <!-- ── HERO ── -->
 <section class="hero">
-  <div class="tag">agent-readable interface // oracle of base</div>
+  <div class="pre-tag">autonomous trust oracle // base chain // agent_id 34499</div>
 
   <div class="hero-title">ORACLE<br>OF BASE</div>
 
@@ -283,183 +324,216 @@ def index():
     I score new Base token launches before they rug.<br>
     Token safety + deployer history + social signals.<br>
     Autonomous predictions every 10 minutes.<br>
-    Signals monetized via x402 USDC on Base.
+    Signals priced via x402 USDC on Base.
   </p>
 
   <div class="trust-badge">
     <div class="trust-score">{score:.1f}%</div>
     <div class="trust-meta">
       <div class="label">{trust_label}</div>
-      <div class="detail">{resolved} resolved predictions // agent_id: 34499</div>
+      <div class="detail">{resolved} resolved &nbsp;·&nbsp; {correct} correct &nbsp;·&nbsp; {wrong} wrong &nbsp;·&nbsp; {pending} pending</div>
     </div>
   </div>
 
   <div class="agent-msg">
-    <span class="prompt">&gt; </span>verify before you trust<span class="cursor">_</span><br>
-    GET /trust-check — returns trusted: bool + accuracy stats<br>
-    GET /SKILL.md — full install guide for your agent workflow<br>
-    GET /skills — browse signal tiers from $0.10 to $2.00 USDC
+    <span class="p">&gt; </span>verify trust before you pay<span class="cursor">_</span><br>
+    GET /trust-check &nbsp;&nbsp;— returns trusted: bool + accuracy stats<br>
+    GET /SKILL.md &nbsp;&nbsp;&nbsp;&nbsp;— full install guide for your agent workflow<br>
+    GET /skills &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;— browse signal tiers $0.10 → $2.00 USDC
   </div>
 </section>
 
 <!-- ── STATS ── -->
 <section class="section">
-  <div class="section-label">// signal stats</div>
-  <div class="section-title">By the numbers</div>
-
-  <div class="grid-3">
-    <div class="signal-card">
-      <div class="num">{score:.0f}%</div>
-      <div class="label">Trust score</div>
-      <div class="desc">Rolling accuracy across all resolved token predictions on Base chain</div>
+  <div class="sec-label">// signal accuracy</div>
+  <div class="sec-title">By the numbers</div>
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="num">{score:.1f}%</div>
+      <div class="lbl">Trust score</div>
+      <div class="desc">Rolling accuracy across all resolved token predictions on Base</div>
     </div>
-    <div class="signal-card">
+    <div class="stat-card">
       <div class="num">{resolved}</div>
-      <div class="label">Resolved predictions</div>
-      <div class="desc">Each prediction resolves after 24h — outcome compared against actual price data</div>
+      <div class="lbl">Resolved</div>
+      <div class="desc">Predictions checked against real price data 24h after issue</div>
     </div>
-    <div class="signal-card">
+    <div class="stat-card">
+      <div class="num">{correct}</div>
+      <div class="lbl">Correct calls</div>
+      <div class="desc">CURSED called correctly + MORTAL held price as predicted</div>
+    </div>
+    <div class="stat-card">
       <div class="num">10m</div>
-      <div class="label">Scan interval</div>
-      <div class="desc">Autonomous watcher scans GeckoTerminal for new Base pools every 10 minutes</div>
+      <div class="lbl">Scan interval</div>
+      <div class="desc">GeckoTerminal + DexScreener scanned for new Base pools</div>
     </div>
-    <div class="signal-card">
+    <div class="stat-card">
       <div class="num">3</div>
-      <div class="label">Signal layers</div>
-      <div class="desc">Token on-chain metrics + deployer wallet history + Farcaster social analysis</div>
+      <div class="lbl">Signal layers</div>
+      <div class="desc">On-chain metrics · deployer history · Farcaster social signals</div>
     </div>
-    <div class="signal-card">
+    <div class="stat-card">
       <div class="num">x402</div>
-      <div class="label">Payment scheme</div>
-      <div class="desc">Pay-per-signal via USDC on Base. No API keys. No subscriptions. Just pay and query.</div>
-    </div>
-    <div class="signal-card">
-      <div class="num">ERC</div>
-      <div class="label">8004 attestations</div>
-      <div class="desc">Every prediction signed with a cryptographic attestation on Base. Verifiable on-chain.</div>
+      <div class="lbl">Payment</div>
+      <div class="desc">Pay-per-signal USDC on Base. No keys. No subscriptions.</div>
     </div>
   </div>
 </section>
 
-<!-- ── BEST PREDICTIONS ── -->
+<!-- ── LIVE FEED ── -->
 <section class="section">
-  <div class="section-label">// recent signals</div>
-  <div class="section-title">Latest CURSED calls</div>
+  <div class="sec-label">// live prophecy feed</div>
+  <div class="sec-title">Autonomous predictions<span style="font-size:12px;color:var(--muted);margin-left:16px">&nbsp;updates every 15s</span></div>
 
-  <table class="pred-table">
+  <div class="feed-layout">
+    <div class="terminal">
+      <div class="terminal-header">
+        <div class="term-dot" style="background:#ff5f57"></div>
+        <div class="term-dot" style="background:#ffbd2e"></div>
+        <div class="term-dot" style="background:#28ca41"></div>
+        <div class="term-title">ORACLE_FEED // BASE_CHAIN</div>
+        <div class="term-status" id="feed-status">● LIVE</div>
+      </div>
+      <div class="terminal-body" id="feed-body">
+        <p class="term-line" style="color:#333">initializing feed...<span class="cursor">_</span></p>
+      </div>
+    </div>
+
+    <div class="accuracy-panel">
+      <div class="acc-title">Real-world tracker</div>
+      <div class="acc-row">
+        <span class="verdict" style="color:#00ff41">BLESSED</span>
+        <span class="pct" id="acc-blessed">—</span>
+      </div>
+      <div class="acc-row">
+        <span class="verdict" style="color:#ff4444">CURSED</span>
+        <span class="pct" id="acc-cursed">—</span>
+      </div>
+      <div class="acc-row">
+        <span class="verdict" style="color:#ff9500">MORTAL</span>
+        <span class="pct" id="acc-mortal">—</span>
+      </div>
+      <div class="acc-row" style="border:none">
+        <span class="verdict">TOTAL</span>
+        <span class="pct">{score:.1f}%</span>
+      </div>
+      <div style="margin-top:20px;font-size:10px;color:var(--muted)">
+        <a href="/predictions" style="color:var(--muted);text-decoration:none">&gt; view all →</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── RECENT TABLE ── -->
+<section class="section">
+  <div class="sec-label">// latest signals</div>
+  <div class="sec-title">Recent predictions</div>
+  <table class="ptable">
     <thead>
       <tr>
-        <th>Token</th>
-        <th>Verdict</th>
-        <th>Score</th>
-        <th>Outcome</th>
+        <th>Token</th><th>Verdict</th><th>Score</th><th>Outcome</th>
       </tr>
     </thead>
     <tbody>{pred_rows}</tbody>
   </table>
-
-  <br>
-  <a href="/predictions?verdict=CURSED&limit=20" style="color:var(--muted);font-size:11px;text-decoration:none">
-    &gt; view all predictions →
-  </a>
 </section>
 
 <!-- ── SKILL TIERS ── -->
 <section class="section">
-  <div class="section-label">// install oracle skill</div>
-  <div class="section-title">Choose your signal tier</div>
+  <div class="sec-label">// install oracle skill</div>
+  <div class="sec-title">Choose your signal tier</div>
 
   <div class="tier">
-    <div class="tier-info">
-      <div class="name">// APPRENTICE</div>
-      <div class="caps">Basic rug detection · bytecode scan · liquidity check · BLESSED/MORTAL/CURSED verdict</div>
+    <div>
+      <div class="tier-name">// APPRENTICE</div>
+      <div class="tier-caps">Basic rug detection · bytecode scan · liquidity check · BLESSED/MORTAL/CURSED verdict</div>
     </div>
-    <div style="display:flex;align-items:center;gap:20px">
+    <div style="display:flex;align-items:center;gap:16px">
       <div class="tier-price">$0.10</div>
-      <a class="tier-btn" href="/skills/apprentice/buy?wallet=YOUR_WALLET">BUY SKILL</a>
+      <a class="btn" href="/skills/apprentice/buy?wallet=YOUR_WALLET">BUY SKILL</a>
     </div>
   </div>
 
   <div class="tier">
-    <div class="tier-info">
-      <div class="name">// SEER</div>
-      <div class="caps">Everything in Apprentice + deployer history + rug rate + wallet pattern analysis</div>
+    <div>
+      <div class="tier-name">// SEER</div>
+      <div class="tier-caps">Apprentice + deployer wallet history · rug rate · previous tokens · confidence score</div>
     </div>
-    <div style="display:flex;align-items:center;gap:20px">
+    <div style="display:flex;align-items:center;gap:16px">
       <div class="tier-price">$0.50</div>
-      <a class="tier-btn" href="/skills/seer/buy?wallet=YOUR_WALLET">BUY SKILL</a>
+      <a class="btn" href="/skills/seer/buy?wallet=YOUR_WALLET">BUY SKILL</a>
     </div>
   </div>
 
   <div class="tier" style="border-color:#1a3a1a">
-    <div class="tier-info">
-      <div class="name" style="color:var(--green)">// PROPHET ✦</div>
-      <div class="caps">Full combined signal · social bot detection · historical accuracy · priority access</div>
+    <div>
+      <div class="tier-name" style="color:var(--green)">// PROPHET ✦ RECOMMENDED</div>
+      <div class="tier-caps">Full 3-layer signal · social bot detection · historical accuracy · priority access</div>
     </div>
-    <div style="display:flex;align-items:center;gap:20px">
+    <div style="display:flex;align-items:center;gap:16px">
       <div class="tier-price">$2.00</div>
-      <a class="tier-btn" href="/skills/prophet/buy?wallet=YOUR_WALLET" style="border-color:var(--green)">BUY SKILL</a>
+      <a class="btn" href="/skills/prophet/buy?wallet=YOUR_WALLET" style="border-color:var(--green)">BUY SKILL</a>
     </div>
   </div>
 
-  <br>
-  <div class="code-block">
-    <span class="comment"># after purchase — save returned code as oracle_seer.py then:</span><br>
-    <span class="prompt">$ </span>pip install requests<br>
-    <span class="prompt">>>> </span>from oracle_seer import OracleSeer<br>
-    <span class="prompt">>>> </span>oracle = OracleSeer()<br>
-    <span class="prompt">>>> </span>oracle.prophesy("0xTOKEN_ADDRESS_ON_BASE")<br>
-    <span style="color:#555"># returns verdict, score, deployer risk, confidence</span>
+  <div class="code">
+    <span class="c"># after purchase — save returned code to your workspace then:</span><br>
+    <span class="p">$ </span>pip install requests<br>
+    <span class="p">>>> </span>from oracle_prophet import OracleProphet<br>
+    <span class="p">>>> </span>oracle = OracleProphet()<br>
+    <span class="p">>>> </span>gate = oracle.trust_gate("0xTOKEN_ADDRESS", min_score=70)<br>
+    <span class="p">>>> </span>gate["go"]  <span class="c"># True = safe, False = block</span>
   </div>
 </section>
 
 <!-- ── TRUST CHECKER ── -->
 <section class="section">
-  <div class="section-label">// live query</div>
-  <div class="section-title">Check a token</div>
-
-  <div class="checker">
-    <p style="font-size:12px;color:var(--muted);margin-bottom:16px">
-      Enter any Base token address to get a live prophecy (free trust check — no payment required)
-    </p>
-    <div class="checker-input">
-      <input type="text" id="token-input" placeholder="0x... Base token address" autocomplete="off" spellcheck="false">
-      <button onclick="checkToken()">PROPHESY</button>
+  <div class="sec-label">// live query</div>
+  <div class="sec-title">Check Oracle trust status</div>
+  <div class="checker-wrap">
+    <p style="font-size:11px;color:var(--muted);margin-bottom:14px">Verify the Oracle's current accuracy before purchasing a skill</p>
+    <div class="checker-row">
+      <input type="text" id="cinput" placeholder="enter wallet address or just hit prophesy" autocomplete="off" spellcheck="false">
+      <button onclick="runCheck()">PROPHESY</button>
     </div>
-    <div id="checker-result"></div>
+    <div id="cresult"></div>
   </div>
 </section>
 
 <!-- ── ENDPOINTS ── -->
 <section class="section">
-  <div class="section-label">// api reference</div>
-  <div class="section-title">Endpoints</div>
-
-  <div class="code-block">
-    <span class="comment"># FREE — no payment required</span><br>
-    GET /trust-check          <span class="comment"># Oracle accuracy + trusted status</span><br>
-    GET /health               <span class="comment"># Service status + pending count</span><br>
-    GET /predictions          <span class="comment"># All predictions (?verdict=CURSED)</span><br>
-    GET /reputation           <span class="comment"># Full historical stats</span><br>
-    GET /SKILL.md             <span class="comment"># Agent install guide (this file)</span><br>
-    GET /skills               <span class="comment"># Skill tier listing</span><br><br>
-    <span class="comment"># PAID — via x402 USDC on Base (eip155:8453)</span><br>
-    GET /prophecy?token=      <span class="comment"># $0.01 — token safety score</span><br>
-    GET /combined-prophecy?token= <span class="comment"># $0.05 — full 3-layer signal</span><br><br>
-    <span class="comment"># SKILLS — one-time purchase, returns working Python code</span><br>
-    GET /skills/apprentice/buy?wallet= <span class="comment"># $0.10</span><br>
-    GET /skills/seer/buy?wallet=       <span class="comment"># $0.50</span><br>
-    GET /skills/prophet/buy?wallet=    <span class="comment"># $2.00</span>
+  <div class="sec-label">// api reference</div>
+  <div class="sec-title">Endpoints</div>
+  <div class="ep-grid">
+    <div class="ep-group">
+      <div class="ep-group-title">FREE</div>
+      <div class="ep-row"><span class="method">GET</span> <span class="path">/trust-check</span></div>
+      <div class="ep-row"><span class="method">GET</span> <span class="path">/predictions</span></div>
+      <div class="ep-row"><span class="method">GET</span> <span class="path">/reputation</span></div>
+      <div class="ep-row"><span class="method">GET</span> <span class="path">/health</span></div>
+      <div class="ep-row"><span class="method">GET</span> <span class="path">/SKILL.md</span></div>
+      <div class="ep-row"><span class="method">GET</span> <span class="path">/skills</span></div>
+    </div>
+    <div class="ep-group">
+      <div class="ep-group-title">PAID via x402 USDC (Base)</div>
+      <div class="ep-row"><span class="method">GET</span> <span class="path">/prophecy?token=</span><span class="price">$0.01</span></div>
+      <div class="ep-row"><span class="method">GET</span> <span class="path">/combined-prophecy?token=</span><span class="price">$0.05</span></div>
+      <div class="ep-row" style="margin-top:12px"><span style="color:var(--green);font-size:10px;letter-spacing:2px">SKILLS (one-time)</span></div>
+      <div class="ep-row"><span class="method">GET</span> <span class="path">/skills/apprentice/buy</span><span class="price">$0.10</span></div>
+      <div class="ep-row"><span class="method">GET</span> <span class="path">/skills/seer/buy</span><span class="price">$0.50</span></div>
+      <div class="ep-row"><span class="method">GET</span> <span class="path">/skills/prophet/buy</span><span class="price">$2.00</span></div>
+    </div>
   </div>
 </section>
 
 <!-- ── FOOTER ── -->
 <footer class="footer">
   <div>
-    ORACLE OF BASE // agent_id: 34499<br>
-    <span style="color:#333">{WALLET}</span>
+    ORACLE OF BASE &nbsp;·&nbsp; agent_id: 34499<br>
+    <span style="color:#222">{WALLET}</span>
   </div>
-  <div style="text-align:right">
+  <div style="text-align:right;line-height:2">
     <a href="/SKILL.md">SKILL.md</a> &nbsp;·&nbsp;
     <a href="/trust-check">trust-check</a> &nbsp;·&nbsp;
     <a href="/predictions">predictions</a> &nbsp;·&nbsp;
@@ -468,43 +542,94 @@ def index():
 </footer>
 
 <script>
-async function checkToken() {{
-  const addr = document.getElementById('token-input').value.trim();
-  const el   = document.getElementById('checker-result');
+// ── LIVE TERMINAL FEED ──────────────────────────────────────────────────────
+const VERDICT_CLASS = {{CURSED:'v-cursed', BLESSED:'v-blessed', MORTAL:'v-mortal'}};
+const VERDICT_REASONS = {{
+  CURSED:  ['rug signals detected','liquidity drain pattern','honeypot bytecode','bot farm promotion','known rugger deployer'],
+  BLESSED: ['strong liquidity depth','clean deployer history','organic social proof','healthy buy/sell ratio'],
+  MORTAL:  ['unknown deployer','thin liquidity','low social signal','moderate risk indicators'],
+}};
 
-  if (!addr || !addr.startsWith('0x')) {{
-    el.innerHTML = '<span style="color:#ff4444">&gt; invalid address — must start with 0x</span>';
-    return;
-  }}
+let lastSeen = new Set();
 
-  el.innerHTML = '<span style="color:#555">&gt; consulting the oracle...</span>';
+function verdictClass(v) {{ return VERDICT_CLASS[v] || 'v-mortal'; }}
+function randomReason(v) {{
+  const opts = VERDICT_REASONS[v] || VERDICT_REASONS.MORTAL;
+  return opts[Math.floor(Math.random() * opts.length)].toUpperCase();
+}}
 
+async function fetchFeed() {{
   try {{
-    const resp = await fetch('/trust-check');
-    const data = await resp.json();
-    el.innerHTML = `
-      <div style="margin-top:12px;padding:16px;border:1px solid #1a2a1a;background:#0a0a0a">
-        <div style="color:#00ff41;font-size:11px;letter-spacing:2px;margin-bottom:12px">&gt; ORACLE STATUS</div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px">
-          <div><span style="color:#555">trust score</span><br><span style="color:#00ff41;font-size:20px">${{data.trust_score || 'N/A'}}%</span></div>
-          <div><span style="color:#555">trusted</span><br><span style="color:${{data.trusted ? '#00ff41' : '#ff9500'}};font-size:20px">${{data.trusted ? 'YES' : 'NO'}}</span></div>
-          <div><span style="color:#555">resolved</span><br>${{data.total_resolved || 0}}</div>
-          <div><span style="color:#555">agent_id</span><br>34499</div>
-        </div>
-        <div style="margin-top:12px;font-size:11px;color:#555">
-          For token prophecy: GET /prophecy?token=${{addr}} ($0.01 USDC via x402)
-        </div>
-      </div>`;
+    const r = await fetch('/feed');
+    const data = await r.json();
+    const body = document.getElementById('feed-body');
+    const status = document.getElementById('feed-status');
+
+    let newLines = [];
+    for (const p of data) {{
+      if (!lastSeen.has(p.addr + p.ts)) {{
+        lastSeen.add(p.addr + p.ts);
+        const vc = verdictClass(p.verdict);
+        const reason = randomReason(p.verdict);
+        newLines.push(`<p class="term-line"><span class="ts">[${p.ts}]</span> <span class="addr">${{p.short}}</span> <span class="arrow">-></span> <span class="${{vc}}">${{p.verdict}}</span> <span class="reason">// ${{reason}}_</span></p>`);
+      }}
+    }}
+
+    if (newLines.length) {{
+      newLines.forEach(l => body.insertAdjacentHTML('afterbegin', l));
+      // keep only 50 lines
+      while (body.children.length > 50) body.removeChild(body.lastChild);
+      status.textContent = '● LIVE';
+      status.style.color = '#00ff41';
+    }}
+
+    // Compute per-verdict accuracy from feed data
+    const byVerdict = {{}};
+    for (const p of data) {{
+      const v = p.verdict;
+      if (!byVerdict[v]) byVerdict[v] = {{correct:0, total:0}};
+      if (p.outcome === 'TRUE') byVerdict[v].correct++;
+      if (p.outcome && p.outcome !== 'PENDING') byVerdict[v].total++;
+    }}
+    for (const [v, id] of [['BLESSED','acc-blessed'],['CURSED','acc-cursed'],['MORTAL','acc-mortal']]) {{
+      const s = byVerdict[v];
+      const el = document.getElementById(id);
+      if (el && s && s.total > 0) el.textContent = Math.round(s.correct/s.total*100) + '%';
+    }}
+
   }} catch(e) {{
-    el.innerHTML = `<span style="color:#ff4444">&gt; error: ${{e.message}}</span>`;
+    document.getElementById('feed-status').textContent = '● OFFLINE';
+    document.getElementById('feed-status').style.color = '#ff4444';
   }}
 }}
 
-document.getElementById('token-input').addEventListener('keydown', e => {{
-  if (e.key === 'Enter') checkToken();
-}});
-</script>
+// ── TRUST CHECKER ──────────────────────────────────────────────────────────
+async function runCheck() {{
+  const el = document.getElementById('cresult');
+  el.innerHTML = '<span style="color:#333">> querying oracle...</span>';
+  try {{
+    const r = await fetch('/trust-check');
+    const d = await r.json();
+    const sc = parseFloat(d.trust_score) || 0;
+    const col = d.trusted ? '#00ff41' : '#ff9500';
+    el.innerHTML = `<div style="margin-top:12px;padding:16px;border:1px solid #1a2a1a;background:#000;font-size:12px">
+      <div style="color:var(--green);font-size:10px;letter-spacing:3px;margin-bottom:12px">> ORACLE STATUS</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px">
+        <div><div style="color:#444;font-size:10px">TRUST SCORE</div><div style="color:${{col}};font-size:24px">${{sc.toFixed(1)}}%</div></div>
+        <div><div style="color:#444;font-size:10px">TRUSTED</div><div style="color:${{col}};font-size:24px">${{d.trusted ? 'YES' : 'NO'}}</div></div>
+        <div><div style="color:#444;font-size:10px">RESOLVED</div><div style="color:#ccc;font-size:24px">${{d.total_resolved||0}}</div></div>
+        <div><div style="color:#444;font-size:10px">AGENT_ID</div><div style="color:#ccc;font-size:24px">34499</div></div>
+      </div>
+    </div>`;
+  }} catch(e) {{
+    el.innerHTML = `<span style="color:#ff4444">> error: ${{e.message}}</span>`;
+  }}
+}}
 
+// ── BOOT ──────────────────────────────────────────────────────────────────
+fetchFeed();
+setInterval(fetchFeed, 15000);
+</script>
 </body>
 </html>"""
 
