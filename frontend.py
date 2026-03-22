@@ -303,8 +303,8 @@ def index():
 
   /* ── CHARTS ── */
   .chart-grid{{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--border)}}
-  .chart-card{{background:var(--bg);padding:24px}}
-  .chart-card canvas{{display:block;width:100%!important}}
+  .chart-card{{background:var(--bg);padding:20px}}
+  .chart-card canvas{{display:block;width:100%!important;max-height:160px}}
   .chart-label{{font-size:10px;letter-spacing:3px;color:var(--green);text-transform:uppercase;margin-bottom:6px}}
   .chart-title{{font-size:14px;color:#fff;margin-bottom:16px}}
   .legend{{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px}}
@@ -408,7 +408,7 @@ def index():
         <div class="legend-item"><div class="legend-dot" style="background:#ff9500"></div>MORTAL</div>
         <div class="legend-item"><div class="legend-dot" style="background:#00ff41"></div>BLESSED</div>
       </div>
-      <canvas id="predsChart" height="180"></canvas>
+      <div style="position:relative;height:160px"><canvas id="predsChart"></canvas></div>
     </div>
 
     <div class="chart-card">
@@ -419,7 +419,7 @@ def index():
         <div class="legend-item"><div class="legend-dot" style="background:#ff9500"></div>Partial</div>
         <div class="legend-item"><div class="legend-dot" style="background:#ff4444"></div>Wrong (FALSE)</div>
       </div>
-      <canvas id="outcomesChart" height="180"></canvas>
+      <div style="position:relative;height:160px"><canvas id="outcomesChart"></canvas></div>
     </div>
 
     <div class="chart-card">
@@ -429,7 +429,7 @@ def index():
         <div class="legend-item"><div class="legend-dot" style="background:#00ff41"></div>Daily accuracy %</div>
         <div class="legend-item"><div class="legend-dot" style="background:#1a3a1a;border:1px solid #00ff41"></div>70% threshold</div>
       </div>
-      <canvas id="accuracyChart" height="180"></canvas>
+      <div style="position:relative;height:160px"><canvas id="accuracyChart"></canvas></div>
     </div>
 
     <div class="chart-card">
@@ -440,7 +440,7 @@ def index():
         <div class="legend-item"><div class="legend-dot" style="background:#ff9500"></div>MORTAL</div>
         <div class="legend-item"><div class="legend-dot" style="background:#00ff41"></div>BLESSED</div>
       </div>
-      <canvas id="distChart" height="180"></canvas>
+      <div style="position:relative;height:160px"><canvas id="distChart"></canvas></div>
     </div>
 
   </div>
