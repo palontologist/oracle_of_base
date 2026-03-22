@@ -301,6 +301,18 @@ def index():
   .footer a{{color:var(--muted);text-decoration:none}}
   .footer a:hover{{color:var(--green)}}
 
+  /* ── CHARTS ── */
+  .chart-grid{{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--border)}}
+  .chart-card{{background:var(--bg);padding:24px}}
+  .chart-card canvas{{display:block;width:100%!important}}
+  .chart-label{{font-size:10px;letter-spacing:3px;color:var(--green);text-transform:uppercase;margin-bottom:6px}}
+  .chart-title{{font-size:14px;color:#fff;margin-bottom:16px}}
+  .legend{{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px}}
+  .legend-item{{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)}}
+  .legend-dot{{width:8px;height:8px;border-radius:50%;flex-shrink:0}}
+
+  @media(max-width:768px){{.chart-grid{{grid-template-columns:1fr}}}}
+
   @media(max-width:768px){{
     .hero{{padding:40px 20px 32px}}
     .section{{padding:56px 20px}}
@@ -378,6 +390,59 @@ def index():
       <div class="lbl">Payment</div>
       <div class="desc">Pay-per-signal USDC on Base. No keys. No subscriptions.</div>
     </div>
+  </div>
+</section>
+
+<!-- ── TRUST GRAPH ── -->
+<section class="section">
+  <div class="sec-label">// prediction accuracy</div>
+  <div class="sec-title">Predictions vs real-world outcomes</div>
+
+  <div class="chart-grid">
+
+    <div class="chart-card">
+      <div class="chart-label">daily predictions</div>
+      <div class="chart-title">Calls made per day</div>
+      <div class="legend">
+        <div class="legend-item"><div class="legend-dot" style="background:#ff4444"></div>CURSED</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#ff9500"></div>MORTAL</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#00ff41"></div>BLESSED</div>
+      </div>
+      <canvas id="predsChart" height="180"></canvas>
+    </div>
+
+    <div class="chart-card">
+      <div class="chart-label">resolution outcomes</div>
+      <div class="chart-title">Outcome accuracy over time</div>
+      <div class="legend">
+        <div class="legend-item"><div class="legend-dot" style="background:#00ff41"></div>Correct (TRUE)</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#ff9500"></div>Partial</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#ff4444"></div>Wrong (FALSE)</div>
+      </div>
+      <canvas id="outcomesChart" height="180"></canvas>
+    </div>
+
+    <div class="chart-card">
+      <div class="chart-label">rolling accuracy</div>
+      <div class="chart-title">Trust score trajectory</div>
+      <div class="legend">
+        <div class="legend-item"><div class="legend-dot" style="background:#00ff41"></div>Daily accuracy %</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#1a3a1a;border:1px solid #00ff41"></div>70% threshold</div>
+      </div>
+      <canvas id="accuracyChart" height="180"></canvas>
+    </div>
+
+    <div class="chart-card">
+      <div class="chart-label">score distribution</div>
+      <div class="chart-title">Scores assigned by verdict</div>
+      <div class="legend">
+        <div class="legend-item"><div class="legend-dot" style="background:#ff4444"></div>CURSED</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#ff9500"></div>MORTAL</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#00ff41"></div>BLESSED</div>
+      </div>
+      <canvas id="distChart" height="180"></canvas>
+    </div>
+
   </div>
 </section>
 
@@ -681,6 +746,176 @@ async function runCheck() {{
 // ── BOOT ──────────────────────────────────────────────────────────────────
 fetchFeed();
 setInterval(fetchFeed, 15000);
+</script>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+// ── CHART DEFAULTS ─────────────────────────────────────────────────────────
+Chart.defaults.color = '#555';
+Chart.defaults.borderColor = '#1a2a1a';
+Chart.defaults.font.family = "'Share Tech Mono', monospace";
+Chart.defaults.font.size = 11;
+Chart.defaults.plugins.legend.display = false;
+Chart.defaults.plugins.tooltip.backgroundColor = '#000';
+Chart.defaults.plugins.tooltip.borderColor = '#1a2a1a';
+Chart.defaults.plugins.tooltip.borderWidth = 1;
+Chart.defaults.plugins.tooltip.titleColor = '#00ff41';
+Chart.defaults.plugins.tooltip.bodyColor = '#888';
+Chart.defaults.plugins.tooltip.padding = 10;
+
+const COLORS = {{
+  CURSED: 'rgba(255,68,68,0.8)',
+  MORTAL: 'rgba(255,149,0,0.8)',
+  BLESSED: 'rgba(0,255,65,0.8)',
+  TRUE:    'rgba(0,255,65,0.8)',
+  FALSE:   'rgba(255,68,68,0.8)',
+  PARTIAL: 'rgba(255,149,0,0.8)',
+}};
+
+// ── BUILD CHARTS ───────────────────────────────────────────────────────────
+async function buildCharts() {{
+  try {{
+    const r = await fetch('/chart-data');
+    const d = await r.json();
+    if (d.error) return;
+
+    // Collect all unique days across both datasets
+    const allDays = [...new Set([
+      ...d.predictions_by_day.map(r => r.day),
+      ...d.accuracy_by_day.map(r => r.day),
+    ])].sort();
+
+    // ── 1. Daily predictions by verdict ────────────────────────────────────
+    const predDays = [...new Set(d.predictions_by_day.map(r => r.day))].sort();
+    const predVerdicts = ['CURSED','MORTAL','BLESSED'];
+    const predDatasets = predVerdicts.map(v => {{
+      const byDay = {{}};
+      d.predictions_by_day.filter(r => r.verdict === v).forEach(r => byDay[r.day] = r.count);
+      return {{
+        label: v,
+        data: predDays.map(day => byDay[day] || 0),
+        backgroundColor: COLORS[v],
+        borderRadius: 2,
+        borderSkipped: false,
+      }};
+    }});
+
+    new Chart(document.getElementById('predsChart'), {{
+      type: 'bar',
+      data: {{ labels: predDays.map(d => d.slice(5)), datasets: predDatasets }},
+      options: {{
+        responsive: true, maintainAspectRatio: false,
+        scales: {{
+          x: {{ stacked: true, grid: {{ color: '#111' }}, ticks: {{ maxRotation: 0 }} }},
+          y: {{ stacked: true, grid: {{ color: '#111' }}, beginAtZero: true, ticks: {{ precision: 0 }} }},
+        }},
+      }},
+    }});
+
+    // ── 2. Resolution outcomes per day ─────────────────────────────────────
+    const outDays = [...new Set(d.outcomes_by_day.map(r => r.day))].sort();
+    const outTypes = ['TRUE','PARTIAL','FALSE'];
+    const outDatasets = outTypes.map(o => {{
+      const byDay = {{}};
+      d.outcomes_by_day.filter(r => r.outcome === o).forEach(r => byDay[r.day] = r.count);
+      return {{
+        label: o,
+        data: outDays.map(day => byDay[day] || 0),
+        backgroundColor: COLORS[o],
+        borderRadius: 2,
+        borderSkipped: false,
+      }};
+    }});
+
+    new Chart(document.getElementById('outcomesChart'), {{
+      type: 'bar',
+      data: {{ labels: outDays.map(d => d.slice(5)), datasets: outDatasets }},
+      options: {{
+        responsive: true, maintainAspectRatio: false,
+        scales: {{
+          x: {{ stacked: true, grid: {{ color: '#111' }}, ticks: {{ maxRotation: 0 }} }},
+          y: {{ stacked: true, grid: {{ color: '#111' }}, beginAtZero: true, ticks: {{ precision: 0 }} }},
+        }},
+      }},
+    }});
+
+    // ── 3. Rolling accuracy trajectory ─────────────────────────────────────
+    let cumCorrect = 0, cumTotal = 0;
+    const accData = d.accuracy_by_day.map(r => {{
+      cumCorrect += (r.correct || 0);
+      cumTotal   += (r.total  || 0);
+      return cumTotal > 0 ? Math.round(cumCorrect / cumTotal * 100) : null;
+    }});
+    const accDays = d.accuracy_by_day.map(r => r.day.slice(5));
+
+    new Chart(document.getElementById('accuracyChart'), {{
+      type: 'line',
+      data: {{
+        labels: accDays,
+        datasets: [
+          {{
+            label: 'Accuracy %',
+            data: accData,
+            borderColor: '#00ff41',
+            backgroundColor: 'rgba(0,255,65,0.05)',
+            borderWidth: 1.5,
+            pointRadius: 2,
+            pointBackgroundColor: '#00ff41',
+            fill: true,
+            tension: 0.3,
+          }},
+          {{
+            label: '70% threshold',
+            data: accDays.map(() => 70),
+            borderColor: 'rgba(0,255,65,0.2)',
+            borderWidth: 1,
+            borderDash: [4, 4],
+            pointRadius: 0,
+            fill: false,
+          }},
+        ],
+      }},
+      options: {{
+        responsive: true, maintainAspectRatio: false,
+        scales: {{
+          x: {{ grid: {{ color: '#111' }}, ticks: {{ maxRotation: 0 }} }},
+          y: {{ grid: {{ color: '#111' }}, min: 0, max: 100, ticks: {{ callback: v => v + '%' }} }},
+        }},
+      }},
+    }});
+
+    // ── 4. Score distribution by verdict ───────────────────────────────────
+    const buckets = ['0-19','20-39','40-59','60-79','80-100'];
+    const distDatasets = ['CURSED','MORTAL','BLESSED'].map(v => {{
+      const byBucket = {{}};
+      d.score_distribution.filter(r => r.verdict === v).forEach(r => byBucket[r.bucket] = r.count);
+      return {{
+        label: v,
+        data: buckets.map(b => byBucket[b] || 0),
+        backgroundColor: COLORS[v],
+        borderRadius: 2,
+        borderSkipped: false,
+      }};
+    }});
+
+    new Chart(document.getElementById('distChart'), {{
+      type: 'bar',
+      data: {{ labels: buckets, datasets: distDatasets }},
+      options: {{
+        responsive: true, maintainAspectRatio: false,
+        scales: {{
+          x: {{ stacked: true, grid: {{ color: '#111' }} }},
+          y: {{ stacked: true, grid: {{ color: '#111' }}, beginAtZero: true, ticks: {{ precision: 0 }} }},
+        }},
+      }},
+    }});
+
+  }} catch(e) {{
+    console.warn('Chart build failed:', e);
+  }}
+}}
+
+buildCharts();
 </script>
 </body>
 </html>"""

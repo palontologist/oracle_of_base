@@ -156,7 +156,11 @@ def get_financial_prophecy():
 
 @app.route('/social-prophecy', methods=['GET'])
 def get_social_prophecy():
-    """Agent purity score — Farcaster identity + posting behaviour + wallet activity."""
+    """
+    Identity read for a Farcaster handle.
+    Venice reasons freely over raw signals — no fixed categories.
+    Returns: nature, score, read, confidence, signals_used.
+    """
     handle = request.args.get('handle')
     if not handle:
         return jsonify({"error": "Missing 'handle'"}), 400
@@ -164,21 +168,27 @@ def get_social_prophecy():
         fate    = social_oracle.consult_the_spirits(handle)
         receipt = social_oracle.generate_attestation(handle, fate)
 
+        # Use nature as the stored verdict — Venice's own words
         prediction_id = save_prediction(
             agent_id            = AGENT_ID,
             prediction_type     = "social",
             subject             = handle,
-            verdict             = fate.get("verdict", "UNKNOWN").split(" ")[0],
-            score               = fate.get("score", 0) // 100,
+            verdict             = fate.get("nature", "unknown"),
+            score               = fate.get("score_100", fate.get("score", 0) // 100),
             raw_data            = fate,
             attestation_uid     = receipt.get("uid", ""),
             resolve_after_hours = RESOLVE_HOURS,
         )
-        log.info(f"Social prediction saved | id={prediction_id[:8]} | handle={handle}")
+        log.info(f"Social read saved | id={prediction_id[:8]} | handle={handle} | nature={fate.get('nature')} | confidence={fate.get('confidence')}")
 
         return jsonify({
-            "prophecy":      fate,
-            "receipt":       receipt,
+            "handle":       handle,
+            "nature":       fate.get("nature"),
+            "score":        fate.get("score_100"),
+            "read":         fate.get("read"),
+            "signals_used": fate.get("signals_used", []),
+            "confidence":   fate.get("confidence"),
+            "attestation":  receipt,
             "prediction_id": prediction_id,
         })
     except Exception as e:
@@ -268,8 +278,8 @@ def get_skill_md():
     import pathlib
     candidates = [
         pathlib.Path(__file__).parent / 'SKILL.md',
-        pathlib.Path('/app/skill.md'),
-        pathlib.Path('skill.md'),
+        pathlib.Path('/app/SKILL.md'),
+        pathlib.Path('SKILL.md'),
     ]
     for path in candidates:
         if path.exists():
@@ -312,6 +322,96 @@ def moltbook_status():
             ),
         })
     except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/chart-data', methods=['GET'])
+def chart_data():
+    """
+    Time-series data for the predictions vs outcomes chart.
+    Returns daily buckets of predictions made and outcomes received.
+    """
+    try:
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+
+                # Daily prediction counts by verdict (last 30 days)
+                cur.execute("""
+                    SELECT
+                        DATE(created_at)  AS day,
+                        verdict,
+                        COUNT(*)          AS count
+                    FROM predictions
+                    WHERE created_at >= NOW() - INTERVAL '30 days'
+                      AND prediction_type = 'token'
+                    GROUP BY DATE(created_at), verdict
+                    ORDER BY day ASC
+                """)
+                pred_rows = cur.fetchall()
+
+                # Daily resolution outcomes (last 30 days)
+                cur.execute("""
+                    SELECT
+                        DATE(r.created_at)  AS day,
+                        r.outcome,
+                        COUNT(*)            AS count,
+                        AVG(r.accuracy)     AS avg_accuracy
+                    FROM resolutions r
+                    WHERE r.created_at >= NOW() - INTERVAL '30 days'
+                    GROUP BY DATE(r.created_at), r.outcome
+                    ORDER BY day ASC
+                """)
+                res_rows = cur.fetchall()
+
+                # Cumulative accuracy over time
+                cur.execute("""
+                    SELECT
+                        DATE(r.created_at) AS day,
+                        COUNT(*) FILTER (WHERE r.outcome = 'TRUE')    AS correct,
+                        COUNT(*) FILTER (WHERE r.outcome = 'FALSE')   AS wrong,
+                        COUNT(*) FILTER (WHERE r.outcome = 'PARTIAL') AS partial,
+                        COUNT(*)                                       AS total
+                    FROM resolutions r
+                    GROUP BY DATE(r.created_at)
+                    ORDER BY day ASC
+                """)
+                acc_rows = cur.fetchall()
+
+                # Score distribution buckets
+                cur.execute("""
+                    SELECT
+                        CASE
+                            WHEN score < 20 THEN '0-19'
+                            WHEN score < 40 THEN '20-39'
+                            WHEN score < 60 THEN '40-59'
+                            WHEN score < 80 THEN '60-79'
+                            ELSE '80-100'
+                        END AS bucket,
+                        COUNT(*) AS count,
+                        verdict
+                    FROM predictions
+                    WHERE prediction_type = 'token'
+                    GROUP BY bucket, verdict
+                    ORDER BY bucket, verdict
+                """)
+                dist_rows = cur.fetchall()
+
+        def fmt(rows):
+            return [{
+                k: (v.isoformat() if hasattr(v, 'isoformat') else
+                    float(v) if hasattr(v, '__float__') and not isinstance(v, int) else v)
+                for k, v in row.items()
+            } for row in rows]
+
+        return jsonify({
+            "predictions_by_day": fmt(pred_rows),
+            "outcomes_by_day":    fmt(res_rows),
+            "accuracy_by_day":    fmt(acc_rows),
+            "score_distribution": fmt(dist_rows),
+        })
+
+    except Exception as e:
+        log.error(f"/chart-data error: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
