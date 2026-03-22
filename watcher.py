@@ -364,6 +364,28 @@ def auto_predict(pair: dict) -> dict | None:
             f"promoter={fate.get('promoter_score')}"
         )
 
+        # ── Emotion read ────────────────────────────────────────────────────
+        emotion_read = {}
+        try:
+            from emotion_engine import get_emotion_engine
+            ee = get_emotion_engine()
+            emotion_read = ee.read(
+                token_address    = token_addr,
+                pair_data        = pair,
+                token_signals    = fate.get("details", {}).get("token_signals", {}),
+                deployer_signals = fate.get("details", {}).get("deployer_signals", {}),
+                promoter_signals = fate.get("details", {}).get("promoter_signals", {}),
+            )
+            log.info(
+                f"🎭 Emotion | {symbol} | "
+                f"emotion={emotion_read.get('market_emotion')} | "
+                f"intention={emotion_read.get('deployer_intention')} | "
+                f"intuition={emotion_read.get('trade_intuition')} | "
+                f"conviction={emotion_read.get('conviction')}"
+            )
+        except Exception as e:
+            log.debug(f"Emotion read skipped: {e}")
+
         # ── Post to Moltbook autonomously ─────────────────────────────────
         try:
             from moltbook_client import post_prediction as mb_post
@@ -380,6 +402,43 @@ def auto_predict(pair: dict) -> dict | None:
             )
         except Exception as e:
             log.warning(f"Moltbook post skipped: {e}")
+
+        # ── Consider opening a fund position ──────────────────────────────
+        try:
+            from fund_manager import get_fund_manager
+            fm = get_fund_manager()
+            entry = fm.consider_entry(
+                token_address = token_addr,
+                oracle_score  = score,
+                verdict       = verdict,
+                symbol        = symbol,
+            )
+            if entry.get("action") == "bought":
+                log.info(
+                    f"💰 Fund entry | {symbol} | ${entry.get('usdc_spent')} USDC | "
+                    f"score={score} | tx={str(entry.get('tx',''))[:16]}..."
+                )
+            elif entry.get("action") not in ("skip", "skipped"):
+                log.warning(f"Fund entry failed | {symbol} | {entry}")
+        except Exception as e:
+            log.warning(f"Fund entry check skipped: {e}")
+
+        # ── Record prediction cost + Sapience forecast search ─────────────
+        try:
+            from edge_engine import get_edge_engine
+            from sapience_trader import get_sapience_trader
+            get_edge_engine().record_prediction_made()
+            st = get_sapience_trader()
+            if st.enabled:
+                st.process_prophecy(
+                    prophecy      = fate,
+                    token_address = token_addr,
+                    symbol        = symbol,
+                    bankroll      = 10.0,
+                    emotion_read  = emotion_read,
+                )
+        except Exception as e:
+            log.debug(f"Edge/Sapience processing skipped: {e}")
 
         return {
             "prediction_id":  prediction_id,

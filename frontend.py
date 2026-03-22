@@ -209,6 +209,14 @@ section{{position:relative;z-index:1;padding:60px 48px;border-bottom:1px solid v
 .mc-price{{font-size:22px;color:var(--g);margin-bottom:8px}}
 .mc-desc{{font-size:11px;color:var(--muted);line-height:1.6}}
 .mc-tag{{display:inline-block;margin-top:10px;font-size:9px;letter-spacing:2px;color:var(--gm);border:1px solid var(--gd);padding:3px 8px}}
+/* ── FUND ── */
+.fund-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:1px;background:var(--border);margin-bottom:1px}}
+.fund-stat{{background:var(--bg);padding:18px}}
+.fund-stat .fn{{font-size:28px;color:var(--g);line-height:1}}
+.fund-stat .fl{{font-size:9px;letter-spacing:3px;color:var(--muted);text-transform:uppercase;margin-top:4px}}
+.pos-table{{width:100%;border-collapse:collapse;font-size:11px;margin-top:16px}}
+.pos-table th{{text-align:left;color:var(--muted);font-size:9px;letter-spacing:2px;text-transform:uppercase;padding:0 10px 10px 0}}
+.pos-table td{{padding:7px 10px 7px 0;border-top:1px solid var(--border)}}
 /* ── CHECKER ── */
 .checker{{background:var(--bg2);border:1px solid var(--border);padding:22px}}
 .irow{{display:flex;gap:0;max-width:560px}}
@@ -446,6 +454,29 @@ footer a:hover{{color:var(--g)}}
       <span style="font-size:10px;color:var(--muted)">on-chain · ENS · GitHub · Gitcoin · Farcaster · Sybil</span>
     </div>
     <div class="result-panel" id="pg-result"></div>
+  </div>
+</section>
+
+<section id="fund-sec">
+  <div class="sec-label">// autonomous fund</div>
+  <div class="sec-title">Oracle trades its own predictions</div>
+  <p style="font-size:11px;color:var(--muted);max-width:520px;margin-bottom:20px;border-left:2px solid var(--gd);padding-left:14px">
+    When the Oracle scores a token BLESSED with confidence ≥ 75, it opens a small USDC position via Uniswap V3.<br>
+    Exits after 24h, or on stop-loss (−35%) or take-profit (+200%).<br>
+    This is proof the Oracle backs its own calls.
+  </p>
+  <div id="fund-stats-wrap">
+    <div class="fund-grid" id="fund-stats-grid">
+      <div class="fund-stat"><div class="fn" id="fs-balance">—</div><div class="fl">USDC balance</div></div>
+      <div class="fund-stat"><div class="fn" id="fs-trades">—</div><div class="fl">Total trades</div></div>
+      <div class="fund-stat"><div class="fn" id="fs-winrate">—</div><div class="fl">Win rate</div></div>
+      <div class="fund-stat"><div class="fn" id="fs-pnl">—</div><div class="fl">Total P&amp;L</div></div>
+      <div class="fund-stat"><div class="fn" id="fs-open">—</div><div class="fl">Open positions</div></div>
+      <div class="fund-stat"><div class="fn" id="fs-enabled">—</div><div class="fl">Status</div></div>
+    </div>
+    <div id="fund-positions-wrap" style="margin-top:1px">
+      <div id="fund-positions-loading" style="padding:16px;color:var(--muted);font-size:11px">loading positions...</div>
+    </div>
   </div>
 </section>
 
@@ -796,10 +827,90 @@ async function runPGCheck() {
   } catch(e) { setError('pg-result', e.message); }
 }
 
-// ── BOOT ──────────────────────────────────────────────────────────────────────
+// ── FUND ─────────────────────────────────────────────────────────────────────
+async function loadFund() {
+  try {
+    const [pnlR, posR] = await Promise.all([
+      fetch('/fund/pnl').then(r => r.json()),
+      fetch('/fund/positions?status=all').then(r => r.json()),
+    ]);
+
+    // Stats
+    const p = pnlR;
+    const enabled = p.fund_enabled;
+    document.getElementById('fs-balance').textContent = enabled ? '$' + (p.usdc_balance || 0).toFixed(2) : 'N/A';
+    document.getElementById('fs-trades').textContent  = p.total_trades || 0;
+    const wr = p.total_trades > 0 ? Math.round((p.winning_trades || 0) / p.total_trades * 100) : 0;
+    document.getElementById('fs-winrate').textContent = p.total_trades > 0 ? wr + '%' : '—';
+    const pnl = parseFloat(p.total_pnl || 0);
+    const pnlEl = document.getElementById('fs-pnl');
+    pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(4);
+    pnlEl.style.color  = pnl >= 0 ? '#00ff41' : '#ff4444';
+    document.getElementById('fs-open').textContent    = p.open_positions || 0;
+    const enEl = document.getElementById('fs-enabled');
+    enEl.textContent   = enabled ? 'LIVE' : 'PAPER';
+    enEl.style.color   = enabled ? '#00ff41' : '#ff9500';
+
+    // Positions table
+    const positions = posR.positions || [];
+    const wrap = document.getElementById('fund-positions-wrap');
+    if (!positions.length) {
+      wrap.innerHTML = '<div style="padding:16px;color:var(--muted);font-size:11px">' +
+        (enabled ? '> no positions yet — waiting for next BLESSED prediction above score 75' :
+                   '> fund disabled — set FUND_ENABLED=true to activate autonomous trading') +
+        '</div>';
+      return;
+    }
+
+    let rows = '';
+    for (const pos of positions) {
+      const sym    = pos.token_symbol || pos.token_address.slice(0,8) + '...';
+      const score  = pos.oracle_score || '—';
+      const entry  = parseFloat(pos.entry_usdc || 0).toFixed(2);
+      const status = pos.status;
+      let pnlCell  = '—';
+      let pnlColor = '#666';
+      if (status === 'OPEN' && pos.unrealised_pnl != null) {
+        const up = parseFloat(pos.unrealised_pnl);
+        pnlCell  = (up >= 0 ? '+' : '') + '$' + up.toFixed(4) + ' (' + (pos.unrealised_pct || 0).toFixed(1) + '%)';
+        pnlColor = up >= 0 ? '#00ff41' : '#ff4444';
+      } else if (status === 'CLOSED' && pos.pnl_usdc != null) {
+        const cp = parseFloat(pos.pnl_usdc);
+        pnlCell  = (cp >= 0 ? '+' : '') + '$' + cp.toFixed(4) + ' (' + parseFloat(pos.pnl_pct || 0).toFixed(1) + '%)';
+        pnlColor = cp >= 0 ? '#00ff41' : '#ff4444';
+      }
+      const statusCol = status === 'OPEN' ? '#00ff41' : '#555';
+      const exitReason = pos.exit_reason ? pos.exit_reason.replace(/_/g, ' ') : '';
+      rows += `<tr>
+        <td style="color:#fff">${sym}</td>
+        <td style="color:#00ff41">${score}</td>
+        <td style="color:#aaa">$${entry}</td>
+        <td style="color:${statusCol};font-size:10px">${status}</td>
+        <td style="color:${pnlColor}">${pnlCell}</td>
+        <td style="color:#333;font-size:10px">${exitReason}</td>
+      </tr>`;
+    }
+
+    wrap.innerHTML = `
+      <table class="pos-table">
+        <thead><tr>
+          <th>Token</th><th>Oracle score</th><th>Invested</th><th>Status</th><th>P&amp;L</th><th>Exit reason</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+
+  } catch(e) {
+    document.getElementById('fund-positions-loading').innerHTML =
+      '<div style="color:#ff4444;font-size:11px">> fund data unavailable: ' + e.message + '</div>';
+  }
+}
+
+// ── BOOT ───────────────────────────────────────────────────────────────────────
 buildCharts();
 fetchFeed();
+loadFund();
 setInterval(fetchFeed, 15000);
+setInterval(loadFund, 30000);
 
 document.addEventListener('keydown', e => {
   if (e.key === 'Enter') {

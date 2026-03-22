@@ -18,6 +18,9 @@ from prophecy_engine  import FinancialProphet
 from oracle_skill     import skill_bp
 from utils.ens        import enrich_address, resolve_ens
 from public_goods_oracle import PublicGoodsOracle
+from fund_manager        import get_fund_manager
+from edge_engine         import get_edge_engine
+from sapience_trader     import get_sapience_trader
 from frontend         import frontend_bp
 from social_prophet   import SocialProphet
 from trust_engine     import full_prophecy
@@ -44,6 +47,9 @@ RESOLVE_HOURS  = int(os.getenv("RESOLVE_AFTER_HOURS", "24"))
 financial_oracle = FinancialProphet(AGENT_ID, PRIVATE_KEY)
 social_oracle    = SocialProphet(AGENT_ID, PRIVATE_KEY)
 public_goods_oracle = PublicGoodsOracle(AGENT_ID)
+fund               = get_fund_manager()
+edge               = get_edge_engine()
+sapience           = get_sapience_trader()
 
 # ── x402 Setup ────────────────────────────────────────────────────────────────
 facilitator = HTTPFacilitatorClientSync({"url": "https://facilitator.x402.org"})
@@ -446,6 +452,66 @@ def public_goods_check():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/edge/forecasts', methods=['GET'])
+def edge_forecasts():
+    """Recent edge forecasts — Oracle's predictions on Sapience markets."""
+    limit = min(int(request.args.get("limit", 20)), 50)
+    return jsonify({
+        "forecasts":    edge.get_edge_forecasts(limit),
+        "calibration":  edge.get_calibration(),
+        "sapience_rank": sapience.get_leaderboard_rank(),
+    })
+
+
+@app.route('/edge/sustainability', methods=['GET'])
+def edge_sustainability():
+    """Agent P&L and sustainability report — all revenue streams vs costs."""
+    days = min(int(request.args.get("days", 7)), 30)
+    report = edge.get_sustainability_report(days)
+    return jsonify(report)
+
+
+@app.route('/edge/markets', methods=['GET'])
+def edge_markets():
+    """Current open Sapience prediction markets."""
+    markets = sapience.get_open_markets()
+    return jsonify({"markets": markets, "count": len(markets)})
+
+
+@app.route('/fund/positions', methods=['GET'])
+def fund_positions():
+    """
+    Live fund positions — open and closed.
+    Shows which tokens the Oracle bought, at what price, current P&L.
+    Free endpoint — transparency is the point.
+    """
+    status = request.args.get("status", "all")
+    positions = fund.get_positions(status=status)
+    # Serialise datetime objects
+    for p in positions:
+        for k, v in p.items():
+            if hasattr(v, 'isoformat'):
+                p[k] = v.isoformat()
+            elif hasattr(v, '__float__') and not isinstance(v, (int, float)):
+                p[k] = float(v)
+    return jsonify({"positions": positions, "count": len(positions)})
+
+
+@app.route('/fund/pnl', methods=['GET'])
+def fund_pnl():
+    """
+    Fund P&L summary.
+    Shows total invested, returned, win rate, current USDC balance.
+    """
+    summary = fund.get_pnl_summary()
+    for k, v in summary.items():
+        if hasattr(v, 'isoformat'):
+            summary[k] = v.isoformat()
+        elif hasattr(v, '__float__') and not isinstance(v, (int, float)):
+            summary[k] = float(v)
+    return jsonify(summary)
+
+
 @app.route('/public-goods-feed', methods=['GET'])
 def public_goods_feed():
     """Recent public goods evaluations — free, no payment required."""
@@ -758,6 +824,11 @@ def start_resolution_scheduler():
                     log.info(f"Resolution cycle: {len(results)} resolved")
             except Exception as e:
                 log.error(f"Resolution cycle error: {e}", exc_info=True)
+            # Run fund exit checks on same cadence
+            try:
+                fund.run_exit_checks()
+            except Exception as e:
+                log.warning(f"Fund exit check error: {e}")
             time.sleep(interval)
 
     t = threading.Thread(target=_loop, daemon=True, name="resolution-engine")
