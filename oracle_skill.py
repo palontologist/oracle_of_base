@@ -25,7 +25,7 @@ skill_bp = Blueprint('skill', __name__)
 
 AGENT_ID       = os.getenv("AGENT_ID", "34499")
 WALLET_ADDRESS = os.getenv("WALLET_ADDRESS", "0x1EA37E2Fb76Aa396072204C90fcEF88093CEb920")
-ORACLE_URL     = os.getenv("ORACLE_URL", "https://your-app.railway.app")
+ORACLE_URL     = os.getenv("ORACLE_URL", "https://web-production-b386a.up.railway.app")
 
 
 # ── Skill definitions ─────────────────────────────────────────────────────────

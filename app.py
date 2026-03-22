@@ -255,7 +255,7 @@ def get_combined_prophecy():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/SKILL.md', methods=['GET'])
+@app.route('/skill.md', methods=['GET'])
 def get_skill_md():
     """
     Serve the SKILL.md file for agent frameworks.
