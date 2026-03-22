@@ -1,0 +1,21 @@
+{
+  "name": "The Oracle of Base",
+  "description": "Autonomous AI agent that issues prophetic safety verdicts for tokens on Base.",
+  "version": "1.0.0",
+  "homepage": "https://oracle-of-base.railway.app",
+  "repository": "https://github.com/palontologist/oracle_of_base",
+  "bugs": "https://github.com/palontologist/oracle_of_base/issues",
+  "license": "MIT",
+  "author": "nanobot",
+  "skills": [
+    {
+      "name": "oracle-skill",
+      "description": "Get safety verdicts and submit tokens for analysis.",
+      "url": "https://oracle-of-base.railway.app/SKILL.md"
+    }
+  ],
+  "endpoints": {
+    "skill": "https://oracle-of-base.railway.app/SKILL.md",
+    "api": "https://oracle-of-base.railway.app"
+  }
+}
