@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 log = logging.getLogger("public_goods_oracle")
 
 VENICE_API_KEY = os.getenv("VENICE_API_KEY", "")
-VENICE_MODEL   = os.getenv("VENICE_MODEL", "qwen3-5-9b")
+VENICE_MODEL   = os.getenv("VENICE_MODEL", "grok-4-20-beta")
 BASE_RPC_URL   = os.getenv("BASE_RPC_URL", "https://mainnet.base.org")
 ETH_RPC_URL    = os.getenv("ETH_RPC_URL",  "https://eth.llamarpc.com")
 GITHUB_TOKEN   = os.getenv("GITHUB_TOKEN", "")   # optional — increases rate limit
