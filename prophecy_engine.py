@@ -5,6 +5,8 @@ import urllib.request
 import os
 import requests
 
+from utils.ens import enrich_address, reverse_lookup
+
 # ERC-8004 Registry Addresses (Base Mainnet)
 # Global semaphore — only one Venice call at a time across all threads
 import threading as _threading
@@ -160,10 +162,14 @@ class FinancialProphet:
                 pairs = [p for p in (data.get('pairs') or []) if p.get('chainId') == 'base']
 
             if not pairs or len(pairs) <= 1:
+                ens = enrich_address(token_address)
                 return {
                     "deployer_history": "unknown",
-                    "note": "First token from this deployer or deployer not identifiable",
+                    "note":             "First token from this deployer or deployer not identifiable",
                     "previous_tokens":  0,
+                    "ens_name":         ens["ens_name"],
+                    "ens_signal":       ens["ens_signal"],
+                    "deployer_display": ens["display"],
                     "risk_implication": "No track record — treat with caution",
                 }
 
@@ -395,7 +401,7 @@ Return ONLY this exact JSON:
 """
 
             payload = {
-                "model": os.getenv("VENICE_MODEL", "grok-41-fast"),
+                "model": os.getenv("VENICE_MODEL", "llama-3.3-70b"),
                 "messages": [
                     {
                         "role":    "system",
@@ -403,7 +409,7 @@ Return ONLY this exact JSON:
                     },
                     {"role": "user", "content": prompt}
                 ],
-                "temperature": float(os.getenv("VENICE_TEMPERATURE", "0.9")),
+                "temperature": float(os.getenv("VENICE_TEMPERATURE", "0.3")),
                 "max_tokens":  200,  # scores + verdict only — keep response small and fast
             }
 
@@ -503,11 +509,17 @@ Return ONLY this exact JSON:
             )
         )
 
+        # ENS enrichment for the token itself
+        token_ens = enrich_address(token_address)
+
         return {
-            "score":          final_score * 100,  # 0-10000 for ERC-8004
-            "verdict":        f"{verdict} ({venice_reason})",
-            "token_score":    token_score,
-            "deployer_score": deployer_score,
+            "score":            final_score * 100,  # 0-10000 for ERC-8004
+            "verdict":          f"{verdict} ({venice_reason})",
+            "token_score":      token_score,
+            "deployer_score":   deployer_score,
+            "ens_name":         token_ens["ens_name"],
+            "deployer_ens":     deployer_signals.get("ens_name"),
+            "deployer_display": deployer_signals.get("deployer_display", token_address[:10] + "..."),
             "promoter_score": promoter_score,
             "price_usd":      token_signals.get('price_usd', 0),
             "details": {

@@ -21,6 +21,7 @@ Endpoints:
 import os
 import json
 import time
+from utils.ens import enrich_address, resolve_ens
 import hashlib
 import logging
 import requests
@@ -73,8 +74,12 @@ class PublicGoodsOracle:
         eth_main        = round(eth_balance  / 1e18, 6)
         total_tx        = base_tx_count + eth_tx_count
 
+        ens = enrich_address(address)
+
         return {
             "address":           address,
+            "ens_name":          ens["ens_name"],
+            "ens_signal":        ens["ens_signal"],
             "base_tx_count":     base_tx_count,
             "eth_tx_count":      eth_tx_count,
             "total_tx_count":    total_tx,
@@ -415,15 +420,21 @@ Respond ONLY with a JSON object — no markdown, no preamble:
             legitimacy_score, flags, strengths, assessment, sybil_risk,
             delivery_confidence, raw_signals
         """
-        log.info(f"🔍 Evaluating public goods project | wallet={wallet[:10]}... | github={github} | handle={farcaster_handle}")
+        # Resolve ENS name if provided instead of address
+        resolved_wallet = resolve_ens(wallet)
+        ens_info = enrich_address(resolved_wallet)
+        display_name = ens_info["display"] if ens_info["has_ens"] else (resolved_wallet[:10] + "...")
+
+        log.info(f"🔍 Evaluating public goods project | wallet={display_name} | ens={ens_info['ens_name']} | github={github} | handle={farcaster_handle}")
 
         signals = {
             "project_name":   project_name or "Unknown",
             "evaluation_for": "public_goods_funding_round",
+            "ens":            ens_info,
         }
 
         # Collect all signal layers in parallel (simple sequential for now)
-        signals["wallet"]      = self._collect_wallet_signals(wallet)
+        signals["wallet"]      = self._collect_wallet_signals(resolved_wallet)
         signals["github"]      = self._collect_github_signals(github)
         signals["farcaster"]   = self._collect_farcaster_signals(farcaster_handle)
         signals["gitcoin"]     = self._collect_gitcoin_signals(wallet)
@@ -442,7 +453,9 @@ Respond ONLY with a JSON object — no markdown, no preamble:
         ).hexdigest()
 
         return {
-            "wallet":               wallet,
+            "wallet":               resolved_wallet,
+            "ens_name":             ens_info["ens_name"],
+            "display":              ens_info["display"],
             "project_name":         project_name,
             "legitimacy_score":     score,
             "flags":                venice.get("flags", []),

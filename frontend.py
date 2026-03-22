@@ -598,7 +598,7 @@ footer a:hover{{color:var(--g)}}
   <div class="checker">
     <p style="font-size:11px;color:var(--muted);margin-bottom:14px">Enter a Base token address (0x...) for a trust check, or a Farcaster handle for a social identity read. Venice analyses both in real time.</p>
     <div class="irow">
-      <input id="cinput" type="text" placeholder="0x... token address  or  farcaster handle" autocomplete="off" spellcheck="false">
+      <input id="cinput" type="text" placeholder="0x... token  ·  farcaster handle  ·  wallet.eth" autocomplete="off" spellcheck="false">
       <button onclick="runCheck()">PROPHESY</button>
     </div>
     <div id="cresult"></div>
@@ -615,7 +615,7 @@ footer a:hover{{color:var(--g)}}
   </p>
   <div class="checker">
     <div class="pg-grid">
-      <div><div class="field-label">Wallet address *</div><input id="pg-wallet" class="field-input" placeholder="0x... team wallet" type="text"></div>
+      <div><div class="field-label">Wallet address *</div><input id="pg-wallet" class="field-input" placeholder="0x... address  or  team.eth" type="text"></div>
       <div><div class="field-label">Project name</div><input id="pg-name" class="field-input" placeholder="optional" type="text"></div>
       <div><div class="field-label">GitHub handle</div><input id="pg-github" class="field-input" placeholder="username or org" type="text"></div>
       <div><div class="field-label">Farcaster handle</div><input id="pg-handle" class="field-input" placeholder="@handle" type="text"></div>
@@ -780,6 +780,7 @@ async function fetchFeed(){{
 
 // ── CHECKER ───────────────────────────────────────────────────────────────
 function isAddr(v){{return/^0x[0-9a-fA-F]{{40}}$/.test(v.trim());}}
+function isEns(v){{return v.trim().endsWith('.eth')||v.trim().endsWith('.xyz');}}
 async function runCheck(){{
   const raw=document.getElementById('cinput').value.trim();
   const el=document.getElementById('cresult');
@@ -787,11 +788,20 @@ async function runCheck(){{
   el.innerHTML='<span style="color:#222">> consulting oracle<span class="cursor">_</span></span>';
   try{{
     if(isAddr(raw)){{
-      const r=await fetch('/trust-check'); const d=await r.json();
+      // Also do ENS reverse lookup for the entered address
+      el.innerHTML='<span style="color:#222">> checking oracle + resolving ENS<span class="cursor">_</span></span>';
+      const [trust, ensR] = await Promise.allSettled([
+        fetch('/trust-check').then(r=>r.json()),
+        fetch('/ens-lookup?address='+encodeURIComponent(raw)).then(r=>r.json()).catch(()=>({{}}))
+      ]);
+      const d  = trust.status==='fulfilled' ? trust.value : {{}};
+      const en = ensR.status==='fulfilled'  ? ensR.value  : {{}};
       const sc=parseFloat(d.trust_score)||0;
       const col=d.trusted?'#00ff41':'#ff9500';
+      const ensTag = en.ens_name ? `<span style="color:#00ff41"> → ${{en.ens_name}}</span>` : '<span style="color:#333"> → no ENS name</span>';
       el.innerHTML=`<div style="margin-top:12px;padding:16px;border:1px solid #1a2a1a;background:#000">
         <div style="color:#00ff41;font-size:9px;letter-spacing:3px;margin-bottom:12px">> ORACLE STATUS</div>
+        <div style="margin-bottom:10px;font-size:11px;color:#555">${{raw.slice(0,10)}}...${{raw.slice(-4)}}${{ensTag}}</div>
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px">
           <div><div style="color:#333;font-size:9px">TRUST SCORE</div><div style="color:${{col}};font-size:24px">${{sc.toFixed(1)}}%</div></div>
           <div><div style="color:#333;font-size:9px">TRUSTED</div><div style="color:${{col}};font-size:24px">${{d.trusted?'YES':'NO'}}</div></div>

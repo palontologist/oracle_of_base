@@ -16,6 +16,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from prophecy_engine  import FinancialProphet
 from oracle_skill     import skill_bp
+from utils.ens        import enrich_address, resolve_ens
 from public_goods_oracle import PublicGoodsOracle
 from frontend         import frontend_bp
 from social_prophet   import SocialProphet
@@ -338,6 +339,32 @@ def moltbook_status():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/ens-lookup', methods=['GET'])
+def ens_lookup():
+    """
+    Free ENS lookup endpoint.
+    Accepts an address and returns ENS name (or None).
+    Also accepts an ENS name and resolves it to an address.
+
+    Query params:
+      address=   0x... wallet address for reverse lookup
+      name=      xxx.eth for forward resolution
+    """
+    address = request.args.get("address", "").strip()
+    name    = request.args.get("name", "").strip()
+
+    if address:
+        info = enrich_address(address)
+        return jsonify(info)
+    elif name:
+        resolved = resolve_ens(name)
+        info     = enrich_address(resolved)
+        info["queried_name"] = name
+        return jsonify(info)
+    else:
+        return jsonify({"error": "Provide address= or name= param"}), 400
+
+
 @app.route('/public-goods-check', methods=['GET'])
 def public_goods_check():
     """
@@ -366,7 +393,14 @@ def public_goods_check():
 
     if not wallet:
         return jsonify({"error": "Missing required param: wallet"}), 400
-    if not wallet.startswith("0x") or len(wallet) != 42:
+
+    # Accept ENS names — resolve to address
+    if not wallet.startswith("0x"):
+        wallet = resolve_ens(wallet)
+        if not wallet.startswith("0x"):
+            return jsonify({"error": f"Could not resolve ENS name: {wallet}"}), 400
+
+    if len(wallet) != 42:
         return jsonify({"error": "Invalid wallet address"}), 400
 
     contributor_wallets = [
