@@ -571,7 +571,7 @@ async function fetchFeed() {{
         lastSeen.add(p.addr + p.ts);
         const vc = verdictClass(p.verdict);
         const reason = randomReason(p.verdict);
-        newLines.push(`<p class="term-line"><span class="ts">[${p.ts}]</span> <span class="addr">${{p.short}}</span> <span class="arrow">-></span> <span class="${{vc}}">${{p.verdict}}</span> <span class="reason">// ${{reason}}_</span></p>`);
+        newLines.push(`<p class="term-line"><span class="ts">[${{p.ts}}]</span> <span class="addr">${{p.short}}</span> <span class="arrow">-></span> <span class="${{vc}}">${{p.verdict}}</span> <span class="reason">// ${{reason}}_</span></p>`);
       }}
     }}
 
