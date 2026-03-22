@@ -401,7 +401,7 @@ Return ONLY this exact JSON:
 """
 
             payload = {
-                "model": os.getenv("VENICE_MODEL", "llama-3.3-70b"),
+                "model": os.getenv("VENICE_MODEL", "qwen3-5-9b"),
                 "messages": [
                     {
                         "role":    "system",
