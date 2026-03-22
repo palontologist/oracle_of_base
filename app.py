@@ -16,6 +16,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from prophecy_engine  import FinancialProphet
 from oracle_skill     import skill_bp
+from frontend         import frontend_bp
 from social_prophet   import SocialProphet
 from trust_engine     import full_prophecy
 from prediction_store import save_prediction, get_reputation_stats, get_conn
@@ -29,6 +30,7 @@ log = logging.getLogger("app")
 
 app = Flask(__name__)
 app.register_blueprint(skill_bp)
+app.register_blueprint(frontend_bp)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 AGENT_ID       = "34499"
@@ -255,20 +257,44 @@ def get_combined_prophecy():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/skill.md', methods=['GET'])
+@app.route('/SKILL.md', methods=['GET'])
 def get_skill_md():
     """
     Serve the SKILL.md file for agent frameworks.
     Any agent that loads skills via URL can discover and install the Oracle.
     """
-    try:
-        skill_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'SKILL.md')
-        with open(skill_path, 'r') as f:
-            content_md = f.read()
-        from flask import Response
-        return Response(content_md, mimetype='text/markdown')
-    except FileNotFoundError:
-        return jsonify({"error": "SKILL.md not found"}), 404
+    from flask import Response
+    # Try multiple locations — works locally and on Railway
+    import pathlib
+    candidates = [
+        pathlib.Path(__file__).parent / 'SKILL.md',
+        pathlib.Path('/app/skill.md'),
+        pathlib.Path('skill.md'),
+    ]
+    for path in candidates:
+        if path.exists():
+            return Response(path.read_text(), mimetype='text/markdown')
+    # Fallback: serve inline if file not found on disk
+    from oracle_skill import SKILLS
+    lines = [
+        "# Oracle of Base — Skill",
+        "",
+        "## Quick start",
+        "",
+        f"Browse tiers: GET /skills",
+        f"Buy apprentice ($0.10): GET /skills/apprentice/buy?wallet=YOUR_WALLET",
+        f"Buy seer ($0.50):       GET /skills/seer/buy?wallet=YOUR_WALLET",
+        f"Buy prophet ($2.00):    GET /skills/prophet/buy?wallet=YOUR_WALLET",
+        "",
+        "## Trust check",
+        "",
+        "GET /trust-check — verify Oracle reliability before purchasing",
+        "",
+        "## Full documentation",
+        "",
+        "GET /skills — complete tier listing with capabilities and pricing",
+    ]
+    return Response("\n".join(lines), mimetype='text/markdown')
 
 
 @app.route('/moltbook/status', methods=['GET'])
