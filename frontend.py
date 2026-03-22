@@ -492,9 +492,9 @@ def index():
   <div class="sec-label">// live query</div>
   <div class="sec-title">Check Oracle trust status</div>
   <div class="checker-wrap">
-    <p style="font-size:11px;color:var(--muted);margin-bottom:14px">Verify the Oracle's current accuracy before purchasing a skill</p>
+    <p style="font-size:11px;color:var(--muted);margin-bottom:14px">Enter a Base token address (0x...) for a trust check, or a Farcaster handle for a social identity read — Venice analyses both in real time</p>
     <div class="checker-row">
-      <input type="text" id="cinput" placeholder="enter wallet address or just hit prophesy" autocomplete="off" spellcheck="false">
+      <input type="text" id="cinput" placeholder="0x... token address  or  farcaster handle" autocomplete="off" spellcheck="false">
       <button onclick="runCheck()">PROPHESY</button>
     </div>
     <div id="cresult"></div>
@@ -604,23 +604,75 @@ async function fetchFeed() {{
 }}
 
 // ── TRUST CHECKER ──────────────────────────────────────────────────────────
+function isTokenAddr(v) {{ return /^0x[0-9a-fA-F]{{40}}$/.test(v.trim()); }}
+function isFarcasterHandle(v) {{ return v.trim().length > 1 && !v.startsWith('0x'); }}
+
 async function runCheck() {{
-  const el = document.getElementById('cresult');
-  el.innerHTML = '<span style="color:#333">> querying oracle...</span>';
+  const raw = document.getElementById('cinput').value.trim();
+  const el  = document.getElementById('cresult');
+  if (!raw) {{
+    el.innerHTML = '<span style="color:#555">> enter a Base token address (0x...) or Farcaster handle</span>';
+    return;
+  }}
+
+  el.innerHTML = '<span style="color:#333">> consulting the oracle<span class="cursor">_</span></span>';
+
   try {{
-    const r = await fetch('/trust-check');
-    const d = await r.json();
-    const sc = parseFloat(d.trust_score) || 0;
-    const col = d.trusted ? '#00ff41' : '#ff9500';
-    el.innerHTML = `<div style="margin-top:12px;padding:16px;border:1px solid #1a2a1a;background:#000;font-size:12px">
-      <div style="color:var(--green);font-size:10px;letter-spacing:3px;margin-bottom:12px">> ORACLE STATUS</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px">
-        <div><div style="color:#444;font-size:10px">TRUST SCORE</div><div style="color:${{col}};font-size:24px">${{sc.toFixed(1)}}%</div></div>
-        <div><div style="color:#444;font-size:10px">TRUSTED</div><div style="color:${{col}};font-size:24px">${{d.trusted ? 'YES' : 'NO'}}</div></div>
-        <div><div style="color:#444;font-size:10px">RESOLVED</div><div style="color:#ccc;font-size:24px">${{d.total_resolved||0}}</div></div>
-        <div><div style="color:#444;font-size:10px">AGENT_ID</div><div style="color:#ccc;font-size:24px">34499</div></div>
-      </div>
-    </div>`;
+    if (isTokenAddr(raw)) {{
+      // ── Token trust check (free endpoint) ─────────────────────────────────
+      const r = await fetch('/trust-check');
+      const d = await r.json();
+      const sc = parseFloat(d.trust_score) || 0;
+      const col = d.trusted ? '#00ff41' : '#ff9500';
+      el.innerHTML = `<div style="margin-top:12px;padding:16px;border:1px solid #1a2a1a;background:#000;font-size:12px">
+        <div style="color:var(--green);font-size:10px;letter-spacing:3px;margin-bottom:12px">> ORACLE STATUS</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;margin-bottom:14px">
+          <div><div style="color:#444;font-size:10px">TRUST SCORE</div><div style="color:${{col}};font-size:22px">${{sc.toFixed(1)}}%</div></div>
+          <div><div style="color:#444;font-size:10px">TRUSTED</div><div style="color:${{col}};font-size:22px">${{d.trusted ? 'YES' : 'NO'}}</div></div>
+          <div><div style="color:#444;font-size:10px">RESOLVED</div><div style="color:#ccc;font-size:22px">${{d.total_resolved||0}}</div></div>
+          <div><div style="color:#444;font-size:10px">AGENT_ID</div><div style="color:#ccc;font-size:22px">34499</div></div>
+        </div>
+        <div style="color:#333;font-size:11px;border-top:1px solid #1a2a1a;padding-top:10px">
+          For a token-specific signal: GET /prophecy?token=${{raw}} ($0.01 USDC via x402)
+        </div>
+      </div>`;
+
+    }} else if (isFarcasterHandle(raw)) {{
+      // ── Social prophecy — calls Venice, takes a moment ────────────────────
+      const handle = raw.replace('@','');
+      el.innerHTML = '<span style="color:#333">> summoning spirits for @' + handle + '<span class="cursor">_</span></span>';
+      const r = await fetch('/social-prophecy?handle=' + encodeURIComponent(handle));
+      const d = await r.json();
+      if (d.error) {{ el.innerHTML = `<span style="color:#ff4444">> ${{d.error}}</span>`; return; }}
+
+      const sc  = d.score || 0;
+      const col = sc >= 70 ? '#00ff41' : sc >= 40 ? '#ff9500' : '#ff4444';
+      const sigs = (d.signals_used || []).map(s => `<span style="color:#333">· ${{s}}</span>`).join('<br>');
+
+      el.innerHTML = `<div style="margin-top:12px;padding:20px;border:1px solid #1a2a1a;background:#000;font-size:12px">
+        <div style="color:var(--green);font-size:10px;letter-spacing:3px;margin-bottom:14px">> IDENTITY READ // @${{handle}}</div>
+
+        <div style="display:grid;grid-template-columns:auto 1fr;gap:20px;align-items:start;margin-bottom:16px">
+          <div>
+            <div style="font-size:36px;color:${{col}};line-height:1">${{sc}}</div>
+            <div style="font-size:10px;color:#444;letter-spacing:2px">SCORE</div>
+          </div>
+          <div>
+            <div style="color:#fff;font-size:13px;margin-bottom:4px">${{d.nature || 'unknown'}}</div>
+            <div style="color:#555;font-size:10px;letter-spacing:2px">${{d.confidence || 'LOW'}} CONFIDENCE</div>
+          </div>
+        </div>
+
+        <div style="color:#888;font-size:12px;line-height:1.7;border-left:2px solid #1a3a1a;padding-left:14px;margin-bottom:14px">
+          ${{d.read || 'No read available.'}}
+        </div>
+
+        ${{sigs ? `<div style="font-size:11px;margin-top:4px">${{sigs}}</div>` : ''}}
+      </div>`;
+
+    }} else {{
+      el.innerHTML = '<span style="color:#555">> enter a Base token address (0x...) or Farcaster handle (e.g. vitalik.eth)</span>';
+    }}
   }} catch(e) {{
     el.innerHTML = `<span style="color:#ff4444">> error: ${{e.message}}</span>`;
   }}

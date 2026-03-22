@@ -1,250 +1,237 @@
+"""
+social_prophet.py
+------------------
+Social identity analysis for Oracle of Base.
+
+Philosophy: collect raw signals, send everything to Venice, let it reason.
+No predetermined categories. No keyword bias. No hard score cutoffs.
+Venice sees the full picture and returns a contextual read.
+"""
+
 import requests
 import json
 import time
 import hashlib
 import os
+import logging
+
+log = logging.getLogger("social_prophet")
+
+VENICE_API_KEY = os.getenv("VENICE_API_KEY", "")
+VENICE_MODEL   = os.getenv("VENICE_MODEL", "llama-3.3-70b")
+BASE_RPC_URL   = os.getenv("BASE_RPC_URL", "https://mainnet.base.org")
 
 
 class SocialProphet:
     def __init__(self, agent_id, private_key):
         self.agent_id    = agent_id
         self.private_key = private_key
-        self.endpoint    = "https://oracle.nanobot.dev/api/v1"
 
-    # ── Data Fetching ─────────────────────────────────────────────────────────
+    # ── Data collection ───────────────────────────────────────────────────────
 
-    def fetch_farcaster_user(self, username: str) -> dict | None:
-        """Fetch user data from Warpcast API."""
-        url = f"https://client.warpcast.com/v2/user-by-username?username={username}"
+    def _fetch_farcaster(self, username: str) -> dict | None:
+        """Fetch full Farcaster profile from Warpcast API."""
         try:
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            response = requests.get(url, headers=headers, timeout=10)
-            if response.status_code == 200:
-                return response.json().get('result', {}).get('user')
-            return None
+            url  = f"https://client.warpcast.com/v2/user-by-username?username={username}"
+            resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            if resp.status_code == 200:
+                return resp.json().get("result", {}).get("user")
         except Exception as e:
-            print(f"Error fetching Farcaster data: {e}")
-            return None
+            log.warning(f"Farcaster fetch failed for {username}: {e}")
+        return None
 
-    def assess_wallet_behaviour(self, wallet_address: str) -> dict:
-        """
-        Assess a wallet's on-chain behaviour via Base RPC.
-        Checks tx count, wallet age, contract interactions.
-        Returns a wallet score 0-100.
-        """
-        if not wallet_address:
-            return {"score": 50, "reason": "no_wallet", "details": {}}
-
+    def _fetch_recent_casts(self, fid: int, limit: int = 10) -> list:
+        """Fetch recent casts to assess content quality and tone."""
         try:
-            base_rpc = os.getenv("BASE_RPC_URL", "https://mainnet.base.org")
+            url  = f"https://client.warpcast.com/v2/casts?fid={fid}&limit={limit}"
+            resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            if resp.status_code == 200:
+                casts = resp.json().get("result", {}).get("casts", [])
+                return [c.get("text", "") for c in casts if c.get("text")]
+        except Exception as e:
+            log.debug(f"Casts fetch failed: {e}")
+        return []
 
-            # Get tx count (nonce = number of txs sent)
-            tx_count_payload = {
-                "jsonrpc": "2.0",
-                "method":  "eth_getTransactionCount",
-                "params":  [wallet_address, "latest"],
-                "id":      1
-            }
-            resp = requests.post(base_rpc, json=tx_count_payload, timeout=8)
-            tx_count = int(resp.json().get('result', '0x0'), 16) if resp.ok else 0
+    def _fetch_wallet(self, address: str) -> dict:
+        """Collect on-chain signals for a verified wallet."""
+        try:
+            def rpc(method, params):
+                r = requests.post(BASE_RPC_URL, json={
+                    "jsonrpc": "2.0", "method": method, "params": params, "id": 1
+                }, timeout=8)
+                return r.json().get("result", "0x0") if r.ok else "0x0"
 
-            # Get ETH balance
-            balance_payload = {
-                "jsonrpc": "2.0",
-                "method":  "eth_getBalance",
-                "params":  [wallet_address, "latest"],
-                "id":      2
-            }
-            resp2    = requests.post(base_rpc, json=balance_payload, timeout=8)
-            balance_wei = int(resp2.json().get('result', '0x0'), 16) if resp2.ok else 0
-            balance_eth = balance_wei / 1e18
-
-            # Score based on activity signals
-            score = 50  # neutral baseline
-
-            # High tx count = established actor
-            if tx_count > 1000:
-                score += 25
-            elif tx_count > 100:
-                score += 15
-            elif tx_count > 10:
-                score += 5
-            elif tx_count == 0:
-                score -= 20  # brand new wallet
-
-            # ETH balance signals skin in the game
-            if balance_eth > 1.0:
-                score += 15
-            elif balance_eth > 0.1:
-                score += 8
-            elif balance_eth < 0.001:
-                score -= 10
-
-            score = max(0, min(100, score))
+            tx_count    = int(rpc("eth_getTransactionCount", [address, "latest"]), 16)
+            balance_wei = int(rpc("eth_getBalance",          [address, "latest"]), 16)
+            balance_eth = round(balance_wei / 1e18, 6)
+            code        = rpc("eth_getCode",                 [address, "latest"])
+            is_contract = code not in ("0x", "0x0", None)
 
             return {
-                "score":  score,
-                "reason": "established_wallet" if score > 70 else "new_wallet" if score < 30 else "moderate_activity",
-                "details": {
-                    "wallet_address": wallet_address,
-                    "tx_count":       tx_count,
-                    "balance_eth":    round(balance_eth, 4),
-                    "is_active":      tx_count > 10,
-                }
+                "address":     address,
+                "tx_count":    tx_count,
+                "balance_eth": balance_eth,
+                "is_contract": is_contract,
+                "age_signal":  "active" if tx_count > 100 else "moderate" if tx_count > 10 else "new",
             }
+        except Exception as e:
+            return {"address": address, "error": str(e)}
+
+    # ── Venice reasoning ──────────────────────────────────────────────────────
+
+    def _consult_venice(self, signals: dict) -> dict:
+        """
+        Pass all raw signals to Venice and ask for a free-form contextual read.
+        No categories, no scoring rubric — Venice reasons from first principles.
+        """
+        prompt = f"""You are a perceptive analyst reading an identity's digital footprint.
+
+You have been given raw signals from a Farcaster profile and optionally their on-chain wallet.
+Your job: reason about who or what this entity is, what they do, and how they present themselves.
+
+Do not apply labels or categories. Do not score them on a fixed scale.
+Think about: What is their focus? Are they building something? Are they an AI agent, a human developer, a community member, a researcher?
+What does their activity pattern suggest? What's interesting or notable about them?
+Be honest — if signals are sparse, say so. If they're rich, draw from them.
+
+════════ SIGNALS ════════
+{json.dumps(signals, indent=2, default=str)}
+═════════════════════════
+
+Respond ONLY with a JSON object — no markdown, no preamble:
+{{
+  "score": <integer 0-100, your overall confidence this is an interesting/trustworthy/authentic entity>,
+  "nature": "<2-5 word characterisation, e.g. 'active defi builder', 'protocol researcher', 'autonomous trading agent', 'community connector', 'early adopter'  — your own words, not a category>",
+  "read": "<2-4 sentences. Your honest read of this entity based on the signals. Personalised, direct, no fluff.>",
+  "signals_used": ["<list the 2-4 signals that most shaped your read>"],
+  "confidence": "<LOW|MEDIUM|HIGH depending on data richness>"
+}}"""
+
+        try:
+            resp = requests.post(
+                "https://api.venice.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {VENICE_API_KEY}",
+                    "Content-Type":  "application/json",
+                },
+                json={
+                    "model":       VENICE_MODEL,
+                    "messages":    [{"role": "user", "content": prompt}],
+                    "temperature": float(os.getenv("VENICE_TEMPERATURE", "0.4")),
+                    "max_tokens":  300,
+                },
+                timeout=int(os.getenv("VENICE_TIMEOUT", "60")),
+            )
+            resp.raise_for_status()
+            raw = resp.json()["choices"][0]["message"]["content"].strip()
+
+            # Strip markdown fences if present
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+
+            return json.loads(raw)
 
         except Exception as e:
-            print(f"Error assessing wallet {wallet_address}: {e}")
-            return {"score": 50, "reason": "assessment_failed", "details": {"error": str(e)}}
+            log.warning(f"Venice social analysis failed: {e}")
+            return {
+                "score":       50,
+                "nature":      "unknown entity",
+                "read":        "Insufficient signals or Venice unavailable — no confident read possible.",
+                "signals_used": [],
+                "confidence":  "LOW",
+            }
 
-    def assess_posting_behaviour(self, fc_user: dict) -> dict:
-        """
-        Analyse posting patterns from Farcaster profile data.
-        Bots post consistently and frequently; humans erratically.
-        """
-        if not fc_user:
-            return {"score": 50, "reason": "no_data", "details": {}}
-
-        following_count = int(fc_user.get('followingCount', 0))
-        follower_count  = int(fc_user.get('followerCount', 0))
-        cast_count      = int(fc_user.get('castCount', 0) or
-                              fc_user.get('activeOnFcNetwork', 0))
-
-        # Follow ratio: bots often follow many, have few followers early on
-        follow_ratio = following_count / max(follower_count, 1)
-
-        score = 50
-        details = {
-            "following":    following_count,
-            "followers":    follower_count,
-            "follow_ratio": round(follow_ratio, 2),
-            "cast_count":   cast_count,
-        }
-
-        # High follow ratio = bot-like behaviour
-        if follow_ratio > 10:
-            score += 20
-            details['signal'] = 'high_follow_ratio_bot_pattern'
-        elif follow_ratio < 0.1 and follower_count > 1000:
-            score -= 15
-            details['signal'] = 'influencer_human_pattern'
-
-        # High cast count with low followers = bot
-        if cast_count > 500 and follower_count < 100:
-            score += 25
-            details['signal'] = 'high_volume_low_reach_bot'
-
-        return {
-            "score":   max(0, min(100, score)),
-            "reason":  "bot_pattern" if score > 70 else "human_pattern" if score < 30 else "ambiguous",
-            "details": details,
-        }
-
-    # ── Core Analysis ─────────────────────────────────────────────────────────
+    # ── Main entrypoint ───────────────────────────────────────────────────────
 
     def consult_the_spirits(self, handle: str) -> dict:
         """
-        Full social analysis: Farcaster identity + posting behaviour + wallet activity.
-        Returns unified agent purity score 0-10000.
+        Full social analysis. Returns a Venice-reasoned contextual profile.
+        No fixed categories — output shaped by the actual signals.
         """
-        print(f"👻 Summoning spirits for handle: {handle}...")
+        username = handle.replace("@", "").strip().lower()
+        log.info(f"👻 Consulting spirits for @{username}")
 
-        username = handle.replace('@', '').lower()
-        fc_user  = self.fetch_farcaster_user(username)
-
-        # ── Identity signals ──────────────────────────────────────────────────
-        identity_score = 5000  # neutral baseline (0-10000 scale)
-        details = {
-            "platform":      "Farcaster",
-            "username":      username,
-            "exists":        False,
-            "bot_keywords":  [],
-            "follower_count": 0,
-        }
+        fc_user = self._fetch_farcaster(username)
+        signals = {"handle": username, "platform": "Farcaster"}
 
         if fc_user:
-            details['exists'] = True
-            profile  = fc_user.get('profile', {})
-            bio      = profile.get('bio', {}).get('text', '').lower()
-            details['bio']            = bio
-            details['follower_count'] = fc_user.get('followerCount', 0)
+            profile = fc_user.get("profile", {})
+            bio     = profile.get("bio", {}).get("text", "")
+            fid     = fc_user.get("fid")
 
-            # Bio keyword analysis
-            bot_keywords   = ['bot', 'agent', 'ai', 'automated', 'llm', 'gpt',
-                               'robot', 'oracle', 'autonomous', 'machine', 'neural']
-            human_keywords = ['human', 'person', 'founder', 'builder', 'engineer',
-                               'artist', 'ceo', 'cto', 'investor']
+            signals.update({
+                "exists":          True,
+                "display_name":    fc_user.get("displayName", username),
+                "bio":             bio,
+                "follower_count":  fc_user.get("followerCount", 0),
+                "following_count": fc_user.get("followingCount", 0),
+                "cast_count":      fc_user.get("castCount", 0),
+                "fid":             fid,
+                "registered_at":   fc_user.get("registeredAt"),
+                "power_badge":     fc_user.get("extras", {}).get("farcasterScore", {}).get("score") if fc_user.get("extras") else None,
+            })
 
-            found_bot   = [kw for kw in bot_keywords   if kw in bio]
-            found_human = [kw for kw in human_keywords if kw in bio]
+            # Follower/following ratio context
+            fc = signals["follower_count"]
+            fw = signals["following_count"]
+            signals["follow_ratio"] = round(fc / max(fw, 1), 2)
+            signals["reach_signal"] = (
+                "high_reach" if fc > 10000
+                else "growing" if fc > 1000
+                else "small_community" if fc > 100
+                else "early_or_niche"
+            )
 
-            details['bot_keywords']   = found_bot
-            details['human_keywords'] = found_human
+            # Recent cast content sample
+            if fid:
+                recent = self._fetch_recent_casts(fid, limit=8)
+                if recent:
+                    signals["recent_cast_sample"] = recent[:5]
+                    signals["avg_cast_length"] = round(
+                        sum(len(c) for c in recent) / len(recent)
+                    )
 
-            if found_bot:
-                identity_score += 2000   # self-identified bot
-            if 'bot' in username or 'ai' in username or 'agent' in username:
-                identity_score += 1500   # bot in username
-            if details['follower_count'] > 1000:
-                identity_score += 500    # popular = likely real agent
-            if found_human:
-                identity_score -= 3000   # self-identified human
-
-            # ── Posting behaviour ─────────────────────────────────────────────
-            posting = self.assess_posting_behaviour(fc_user)
-            details['posting_behaviour'] = posting
-            # Scale posting score (0-100) into our 0-10000 range adjustment
-            posting_adjustment = int((posting['score'] - 50) * 50)
-            identity_score += posting_adjustment
-
-            # ── Wallet assessment (if verifiedAddresses available) ────────────
-            verified_addrs = fc_user.get('verifiedAddresses', {})
-            eth_addresses  = verified_addrs.get('ethAddresses', []) if verified_addrs else []
-
-            if eth_addresses:
-                wallet          = eth_addresses[0]
-                wallet_result   = self.assess_wallet_behaviour(wallet)
-                details['wallet'] = wallet_result
-                # Scale wallet score into range adjustment
-                wallet_adjustment = int((wallet_result['score'] - 50) * 40)
-                identity_score   += wallet_adjustment
-            else:
-                details['wallet'] = {"score": 50, "reason": "no_verified_wallet"}
+            # Verified wallets
+            verified = fc_user.get("verifiedAddresses", {})
+            eth_addrs = verified.get("ethAddresses", []) if verified else []
+            if eth_addrs:
+                signals["wallet"] = self._fetch_wallet(eth_addrs[0])
+                signals["verified_wallets_count"] = len(eth_addrs)
 
         else:
-            # Fallback for non-Farcaster: hash-based neutral score
-            details['note'] = "User not found on Farcaster"
-            h = int(hashlib.sha256(username.encode()).hexdigest(), 16)
-            identity_score = (h % 10000)
+            signals.update({
+                "exists": False,
+                "note":   "Handle not found on Farcaster — no profile data available",
+            })
 
-        final_score = max(0, min(10000, identity_score))
+        # Let Venice reason over everything
+        venice_read = self._consult_venice(signals)
+
+        # Score is 0-100 from Venice, scale to 0-10000 for attestation compat
+        score_100  = int(venice_read.get("score", 50))
+        score_full = score_100 * 100
 
         return {
-            "score":   final_score,
-            "verdict": self._interpret_score(final_score),
-            "details": details,
+            "score":       score_full,
+            "score_100":   score_100,
+            "nature":      venice_read.get("nature", "unknown"),
+            "read":        venice_read.get("read", ""),
+            "signals_used": venice_read.get("signals_used", []),
+            "confidence":  venice_read.get("confidence", "LOW"),
+            "handle":      username,
+            "raw_signals": signals,
         }
 
-    def _interpret_score(self, score: int) -> str:
-        if score > 8000:
-            return "PURE AGENT (Code Only)"
-        if score > 4000:
-            return "CYBORG (Human-in-the-loop)"
-        return "HUMAN (Meatbag Detected)"
-
-    # ── Attestation ───────────────────────────────────────────────────────────
-
-    def generate_attestation(self, handle: str, analysis_result: dict) -> dict:
-        """Format analysis into ERC-8004 Reputation Registry payload."""
+    def generate_attestation(self, handle: str, result: dict) -> dict:
         return {
             "agentId":       self.agent_id,
             "target":        handle,
-            "value":         analysis_result['score'],
+            "value":         result["score"],
             "valueDecimals": 2,
             "tag1":          "social-prophecy",
-            "tag2":          "agent-purity",
-            "endpoint":      self.endpoint,
-            "metadata_ipfs": "ipfs://QmPlaceholderForSocialReport",
+            "tag2":          "identity-read",
             "timestamp":     int(time.time()),
             "uid":           hashlib.sha256(
                 f"{self.agent_id}{handle}{int(time.time())}".encode()
@@ -252,12 +239,12 @@ class SocialProphet:
         }
 
 
-# ── Demo ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    oracle = SocialProphet("34499", "private_key_placeholder")
-    for handle in ["clanker", "dwr", "bountycaster", "perl"]:
-        print(f"\n--- ANALYZING {handle} ---")
-        fate = oracle.consult_the_spirits(handle)
-        print(f"Verdict: {fate['verdict']}")
-        print(f"Score:   {fate['score'] / 100}/100")
-        print(f"Details: {json.dumps(fate['details'], indent=2)}")
+    oracle = SocialProphet("34499", "")
+    for h in ["vitalik.eth", "dwr", "clanker", "bountycaster"]:
+        print(f"\n--- @{h} ---")
+        r = oracle.consult_the_spirits(h)
+        print(f"Nature:     {r['nature']}")
+        print(f"Score:      {r['score_100']}/100")
+        print(f"Confidence: {r['confidence']}")
+        print(f"Read:       {r['read']}")
