@@ -2,10 +2,19 @@
 ### Submission for Synthesis Hackathon 2026
 
 Live: https://oracle-of-base.up.railway.app  
+Team: Ace
 Agent ID: 34499  
 Wallet: 0x1EA37E2Fb76Aa396072204C90fcEF88093CEb920  
 Moltbook: https://www.moltbook.com/u/theoracleofbase  
 Trust check: https://oracle-of-base.up.railway.app/trust-check
+
+## Demo Video
+[Watch the Oracle in Action](https://youtu.be/6eOEI9b3wgc)
+
+## Screenshots
+![Oracle Dashboard](https://github.com/palontologist/oracle_of_base/blob/main/numbers.png?raw=true)
+![Prediction Breakdown](https://github.com/palontologist/oracle_of_base/blob/main/numbers0.png?raw=true)
+![Social Prophecy](https://github.com/palontologist/oracle_of_base/blob/main/oracle_personal_profile%20score.png?raw=true)
 
 ---
 
@@ -131,6 +140,23 @@ Safety guardrails are in place:
 
 ---
 
+## ENS Integration
+
+The Oracle fully supports ENS (Ethereum Name Service) to bridge the gap between human-readable identities and machine-readable risk signals.
+
+**1. Input Resolution**
+All API endpoints accept ENS names (e.g., `vitalik.eth`) instead of raw addresses. The Oracle resolves these via the ENS Ideas gateway before analysis, making the API friendlier for both human operators and other agents.
+
+**2. Reverse Lookup Enrichment**
+When analyzing a deployer, the Oracle performs a reverse lookup to check if the address has a primary ENS name. This is a critical signal:
+- **Anonymous Address**: Higher risk, no reputation at stake.
+- **ENS Identity**: "Skin in the game" signal. A deployer who burned gas to register a name is less likely to rug under that identity.
+
+**3. Identity-Aware Output**
+Verdicts and Moltbook posts display the ENS name when available, providing clearer context to the network (e.g., "Deployer: protocol.eth" vs "Deployer: 0x123...").
+
+---
+
 ## Track alignment
 
 **Base: Agent Services on Base** — The Oracle is a service agents pay for via x402, discoverable via SKILL.md, with meaningful utility proven by a 74% accuracy rate across 78 resolved predictions.
@@ -153,6 +179,19 @@ Core files:
 - `oracle_skill.py` — tiered skill delivery
 - `moltbook_client.py` — agent social broadcasting
 - `frontend.py` — terminal-aesthetic live dashboard
+
+---
+
+## Visuals
+
+**Oracle Dashboard (Trust Score & Recent Predictions)**
+![Oracle Dashboard](https://github.com/palontologist/oracle_of_base/blob/main/numbers.png?raw=true)
+
+**Detailed Prediction Breakdown**
+![Prediction Breakdown](https://github.com/palontologist/oracle_of_base/blob/main/numbers0.png?raw=true)
+
+**Social Prophecy (Venice AI Identity Read)**
+![Social Prophecy](https://github.com/palontologist/oracle_of_base/blob/main/oracle_personal_profile%20score.png?raw=true)
 
 ---
 
