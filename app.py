@@ -15,6 +15,7 @@ load_dotenv()
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from prophecy_engine  import FinancialProphet
+from oracle_skill     import skill_bp
 from social_prophet   import SocialProphet
 from trust_engine     import full_prophecy
 from prediction_store import save_prediction, get_reputation_stats, get_conn
@@ -27,6 +28,7 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("app")
 
 app = Flask(__name__)
+app.register_blueprint(skill_bp)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 AGENT_ID       = "34499"
@@ -74,6 +76,40 @@ routes = {
             "token":   "USDC"
         }],
         "description": "Full trust assessment — token + deployer + social signals combined",
+        "mimeType":    "application/json"
+    },
+    # ── Skill tiers — one-time purchase gives working agent code ──────────────
+    "GET /skills/apprentice/buy": {
+        "accepts": [{
+            "scheme":  "exact",
+            "price":   "$0.10",
+            "network": "eip155:8453",
+            "payTo":   WALLET_ADDRESS,
+            "token":   "USDC"
+        }],
+        "description": "Oracle Apprentice skill — basic rug detection code",
+        "mimeType":    "application/json"
+    },
+    "GET /skills/seer/buy": {
+        "accepts": [{
+            "scheme":  "exact",
+            "price":   "$0.50",
+            "network": "eip155:8453",
+            "payTo":   WALLET_ADDRESS,
+            "token":   "USDC"
+        }],
+        "description": "Oracle Seer skill — full token + deployer analysis code",
+        "mimeType":    "application/json"
+    },
+    "GET /skills/prophet/buy": {
+        "accepts": [{
+            "scheme":  "exact",
+            "price":   "$2.00",
+            "network": "eip155:8453",
+            "payTo":   WALLET_ADDRESS,
+            "token":   "USDC"
+        }],
+        "description": "Oracle Prophet skill — full combined signal code",
         "mimeType":    "application/json"
     },
 }
@@ -217,6 +253,22 @@ def get_combined_prophecy():
     except Exception as e:
         log.error(f"/combined-prophecy error: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/SKILL.md', methods=['GET'])
+def get_skill_md():
+    """
+    Serve the SKILL.md file for agent frameworks.
+    Any agent that loads skills via URL can discover and install the Oracle.
+    """
+    try:
+        skill_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'SKILL.md')
+        with open(skill_path, 'r') as f:
+            content_md = f.read()
+        from flask import Response
+        return Response(content_md, mimetype='text/markdown')
+    except FileNotFoundError:
+        return jsonify({"error": "SKILL.md not found"}), 404
 
 
 @app.route('/moltbook/status', methods=['GET'])
@@ -399,9 +451,14 @@ def health_check():
         "resolved":    stats.get("total_resolved"),
         "pending":     stats.get("pending"),
         "endpoints": {
-            "free":    ["/health", "/trust-check", "/reputation"],
+            "free":    ["/health", "/trust-check", "/reputation", "/predictions", "/skills"],
             "$0.01":   ["/prophecy", "/social-prophecy"],
             "$0.05":   ["/combined-prophecy"],
+            "skills": {
+                "$0.10": "/skills/apprentice/buy",
+                "$0.50": "/skills/seer/buy",
+                "$2.00": "/skills/prophet/buy",
+            },
         },
         "watcher": {
             "interval_seconds": int(os.getenv("WATCH_INTERVAL_SECONDS", "600")),
