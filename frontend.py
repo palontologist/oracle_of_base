@@ -37,6 +37,8 @@ def _get_trust():
 
 def _get_recent_predictions(limit=20):
     """Pull recent predictions directly from DB."""
+    import logging
+    log = logging.getLogger("frontend")
     try:
         from prediction_store import get_conn
         import psycopg2.extras
@@ -56,33 +58,40 @@ def _get_recent_predictions(limit=20):
         cur.close()
         conn.close()
         return [dict(r) for r in rows]
-    except Exception:
+    except Exception as e:
+        log.error(f"_get_recent_predictions error: {e}", exc_info=True)
         return []
 
 
 @frontend_bp.route('/feed', methods=['GET'])
 def feed_api():
     """JSON feed for the live terminal — polled every 15s by frontend JS."""
-    preds = _get_recent_predictions(30)
-    out = []
-    for p in preds:
-        addr = p.get("token_address", "")
-        verdict = str(p.get("verdict", "")).split(" ")[0]
-        score = p.get("score", 0)
-        status = p.get("status", "PENDING")
-        outcome = p.get("outcome", "")
-        created = p.get("created_at")
-        ts = created.strftime("%H:%M:%S") if created else "??:??:??"
-        out.append({
-            "ts": ts,
-            "addr": addr,
-            "short": addr[:6] + "..." + addr[-4:] if addr else "unknown",
-            "verdict": verdict,
-            "score": score,
-            "status": status,
-            "outcome": outcome,
-        })
-    return jsonify(out)
+    try:
+        preds = _get_recent_predictions(50)
+        out = []
+        for p in preds:
+            addr    = p.get("token_address", "")
+            verdict = str(p.get("verdict", "")).split(" ")[0]
+            score   = p.get("score", 0)
+            status  = p.get("status", "PENDING")
+            outcome = p.get("outcome") or ""
+            created = p.get("created_at")
+            ts      = created.strftime("%H:%M:%S") if created else "??:??:??"
+            out.append({
+                "ts":      ts,
+                "date":    created.strftime("%m-%d") if created else "",
+                "addr":    addr,
+                "short":   addr[:6] + "..." + addr[-4:] if len(addr) > 10 else addr,
+                "verdict": verdict,
+                "score":   score,
+                "status":  status,
+                "outcome": outcome,
+            })
+        return jsonify({"predictions": out, "count": len(out)})
+    except Exception as e:
+        import logging
+        logging.getLogger("frontend").error(f"/feed error: {e}", exc_info=True)
+        return jsonify({"predictions": [], "count": 0, "error": str(e)})
 
 
 @frontend_bp.route('/', methods=['GET'])
@@ -610,61 +619,97 @@ def index():
 // ── LIVE TERMINAL FEED ──────────────────────────────────────────────────────
 const VERDICT_CLASS = {{CURSED:'v-cursed', BLESSED:'v-blessed', MORTAL:'v-mortal'}};
 const VERDICT_REASONS = {{
-  CURSED:  ['rug signals detected','liquidity drain pattern','honeypot bytecode','bot farm promotion','known rugger deployer'],
-  BLESSED: ['strong liquidity depth','clean deployer history','organic social proof','healthy buy/sell ratio'],
-  MORTAL:  ['unknown deployer','thin liquidity','low social signal','moderate risk indicators'],
+  CURSED:  ['RUG SIGNALS DETECTED','LIQUIDITY DRAIN PATTERN','HONEYPOT BYTECODE','BOT FARM PROMOTION','KNOWN RUGGER DEPLOYER','ZERO ORGANIC VOLUME'],
+  BLESSED: ['STRONG LIQUIDITY DEPTH','CLEAN DEPLOYER HISTORY','ORGANIC SOCIAL PROOF','HEALTHY BUY/SELL RATIO'],
+  MORTAL:  ['UNKNOWN DEPLOYER','THIN LIQUIDITY','LOW SOCIAL SIGNAL','MODERATE RISK INDICATORS','UNVERIFIED CONTRACT'],
 }};
 
 let lastSeen = new Set();
+let firstLoad = true;
 
 function verdictClass(v) {{ return VERDICT_CLASS[v] || 'v-mortal'; }}
 function randomReason(v) {{
   const opts = VERDICT_REASONS[v] || VERDICT_REASONS.MORTAL;
-  return opts[Math.floor(Math.random() * opts.length)].toUpperCase();
+  return opts[Math.floor(Math.random() * opts.length)];
+}}
+function outcomeTag(outcome, status) {{
+  if (!outcome || status === 'PENDING') return '<span style="color:#333"> // PENDING_</span>';
+  const col = outcome === 'TRUE' ? '#00ff41' : outcome === 'PARTIAL' ? '#ff9500' : '#ff4444';
+  return `<span style="color:${{col}}"> → ${{outcome}}_</span>`;
 }}
 
 async function fetchFeed() {{
   try {{
     const r = await fetch('/feed');
-    const data = await r.json();
+    const json = await r.json();
+    const preds = json.predictions || [];
     const body = document.getElementById('feed-body');
     const status = document.getElementById('feed-status');
 
+    if (json.error) {{
+      body.innerHTML = `<p class="term-line" style="color:#ff4444">> ERROR: ${{json.error}}</p>`;
+      return;
+    }}
+
+    if (preds.length === 0) {{
+      body.innerHTML = `<p class="term-line" style="color:#333">> no predictions yet — watcher runs every 10 minutes<span class="cursor">_</span></p>`;
+      return;
+    }}
+
     let newLines = [];
-    for (const p of data) {{
-      if (!lastSeen.has(p.addr + p.ts)) {{
-        lastSeen.add(p.addr + p.ts);
-        const vc = verdictClass(p.verdict);
+    for (const p of preds) {{
+      const key = p.addr + p.ts;
+      if (!lastSeen.has(key)) {{
+        lastSeen.add(key);
+        const vc     = verdictClass(p.verdict);
         const reason = randomReason(p.verdict);
-        newLines.push(`<p class="term-line"><span class="ts">[${{p.ts}}]</span> <span class="addr">${{p.short}}</span> <span class="arrow">-></span> <span class="${{vc}}">${{p.verdict}}</span> <span class="reason">// ${{reason}}_</span></p>`);
+        const otag   = outcomeTag(p.outcome, p.status);
+        newLines.push(
+          `<p class="term-line">` +
+          `<span class="ts">[${{p.date}} ${{p.ts}}]</span> ` +
+          `<span class="addr">${{p.short}}</span> ` +
+          `<span class="arrow">-></span> ` +
+          `<span class="${{vc}}">${{p.verdict}}</span> ` +
+          `<span class="reason">// ${{reason}}</span>` +
+          `${{otag}}` +
+          `</p>`
+        );
       }}
     }}
 
     if (newLines.length) {{
-      newLines.forEach(l => body.insertAdjacentHTML('afterbegin', l));
-      // keep only 50 lines
-      while (body.children.length > 50) body.removeChild(body.lastChild);
+      // On first load show oldest at bottom, newest at top
+      if (firstLoad) {{
+        body.innerHTML = newLines.reverse().join('');
+        firstLoad = false;
+      }} else {{
+        newLines.forEach(l => body.insertAdjacentHTML('afterbegin', l));
+      }}
+      while (body.children.length > 60) body.removeChild(body.lastChild);
       status.textContent = '● LIVE';
       status.style.color = '#00ff41';
     }}
 
-    // Compute per-verdict accuracy from feed data
+    // Per-verdict accuracy sidebar
     const byVerdict = {{}};
-    for (const p of data) {{
+    for (const p of preds) {{
       const v = p.verdict;
       if (!byVerdict[v]) byVerdict[v] = {{correct:0, total:0}};
-      if (p.outcome === 'TRUE') byVerdict[v].correct++;
-      if (p.outcome && p.outcome !== 'PENDING') byVerdict[v].total++;
+      if (p.outcome === 'TRUE')  byVerdict[v].correct++;
+      if (p.outcome && p.outcome !== '') byVerdict[v].total++;
     }}
     for (const [v, id] of [['BLESSED','acc-blessed'],['CURSED','acc-cursed'],['MORTAL','acc-mortal']]) {{
-      const s = byVerdict[v];
+      const s  = byVerdict[v];
       const el = document.getElementById(id);
-      if (el && s && s.total > 0) el.textContent = Math.round(s.correct/s.total*100) + '%';
+      if (el && s && s.total > 0) el.textContent = Math.round(s.correct / s.total * 100) + '%';
+      else if (el && (!s || s.total === 0)) el.textContent = '—';
     }}
 
   }} catch(e) {{
     document.getElementById('feed-status').textContent = '● OFFLINE';
     document.getElementById('feed-status').style.color = '#ff4444';
+    document.getElementById('feed-body').innerHTML =
+      `<p class="term-line" style="color:#ff4444">> fetch failed: ${{e.message}}</p>`;
   }}
 }}
 
