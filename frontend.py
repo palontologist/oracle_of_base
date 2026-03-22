@@ -575,6 +575,56 @@ def index():
   </div>
 </section>
 
+<!-- ── PUBLIC GOODS ── -->
+<section class="section">
+  <div class="sec-label">// public goods evaluation</div>
+  <div class="sec-title">Legitimacy analysis for funding rounds</div>
+
+  <p style="font-size:12px;color:var(--muted);max-width:560px;margin-bottom:28px;border-left:2px solid var(--green-dark);padding-left:14px;">
+    Built for Octant, Gitcoin, and similar public goods funding rounds.<br>
+    Enter a team wallet + optional GitHub and Farcaster handle.<br>
+    Venice AI reasons over all signals — on-chain history, GitHub activity,
+    Gitcoin Passport score, Farcaster presence, Sybil cluster detection.
+  </p>
+
+  <div class="checker-wrap">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+      <div>
+        <div style="font-size:10px;color:var(--muted);letter-spacing:2px;margin-bottom:6px">WALLET ADDRESS *</div>
+        <input id="pg-wallet" type="text" placeholder="0x... team wallet (required)"
+               style="width:100%;background:#000;border:1px solid var(--border);color:var(--green);font-family:var(--font);font-size:12px;padding:10px 14px;outline:none">
+      </div>
+      <div>
+        <div style="font-size:10px;color:var(--muted);letter-spacing:2px;margin-bottom:6px">PROJECT NAME</div>
+        <input id="pg-name" type="text" placeholder="project name (optional)"
+               style="width:100%;background:#000;border:1px solid var(--border);color:var(--green);font-family:var(--font);font-size:12px;padding:10px 14px;outline:none">
+      </div>
+      <div>
+        <div style="font-size:10px;color:var(--muted);letter-spacing:2px;margin-bottom:6px">GITHUB HANDLE</div>
+        <input id="pg-github" type="text" placeholder="username or org (optional)"
+               style="width:100%;background:#000;border:1px solid var(--border);color:var(--green);font-family:var(--font);font-size:12px;padding:10px 14px;outline:none">
+      </div>
+      <div>
+        <div style="font-size:10px;color:var(--muted);letter-spacing:2px;margin-bottom:6px">FARCASTER HANDLE</div>
+        <input id="pg-handle" type="text" placeholder="@handle (optional)"
+               style="width:100%;background:#000;border:1px solid var(--border);color:var(--green);font-family:var(--font);font-size:12px;padding:10px 14px;outline:none">
+      </div>
+    </div>
+    <div style="margin-bottom:12px">
+      <div style="font-size:10px;color:var(--muted);letter-spacing:2px;margin-bottom:6px">CONTRIBUTOR WALLETS (comma separated, optional — Sybil check)</div>
+      <input id="pg-contribs" type="text" placeholder="0x..., 0x..., 0x..."
+             style="width:100%;background:#000;border:1px solid var(--border);color:var(--green);font-family:var(--font);font-size:12px;padding:10px 14px;outline:none">
+    </div>
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+      <button onclick="runPGCheck()" class="btn" style="padding:12px 28px;font-size:11px">
+        EVALUATE PROJECT &nbsp;// $0.05 USDC via x402
+      </button>
+      <span style="font-size:11px;color:var(--muted)">Checks: on-chain · GitHub · Gitcoin Passport · Farcaster · Sybil cluster</span>
+    </div>
+    <div id="pg-result" style="margin-top:16px;font-size:12px;min-height:18px"></div>
+  </div>
+</section>
+
 <!-- ── ENDPOINTS ── -->
 <section class="section">
   <div class="sec-label">// api reference</div>
@@ -783,6 +833,85 @@ async function runCheck() {{
     }} else {{
       el.innerHTML = '<span style="color:#555">> enter a Base token address (0x...) or Farcaster handle (e.g. vitalik.eth)</span>';
     }}
+  }} catch(e) {{
+    el.innerHTML = `<span style="color:#ff4444">> error: ${{e.message}}</span>`;
+  }}
+}}
+
+// ── PUBLIC GOODS CHECK ────────────────────────────────────────────────────
+async function runPGCheck() {{
+  const wallet  = document.getElementById('pg-wallet').value.trim();
+  const name    = document.getElementById('pg-name').value.trim();
+  const github  = document.getElementById('pg-github').value.trim();
+  const handle  = document.getElementById('pg-handle').value.trim();
+  const contribs = document.getElementById('pg-contribs').value.trim();
+  const el      = document.getElementById('pg-result');
+
+  if (!wallet || !wallet.startsWith('0x')) {{
+    el.innerHTML = '<span style="color:#ff4444">> wallet address required (must start with 0x)</span>';
+    return;
+  }}
+
+  el.innerHTML = '<span style="color:#333">> consulting oracle on project legitimacy<span class="cursor">_</span></span>';
+
+  try {{
+    const params = new URLSearchParams({{ wallet }});
+    if (name)    params.set('project', name);
+    if (github)  params.set('github', github);
+    if (handle)  params.set('handle', handle.replace('@',''));
+    if (contribs) params.set('contributors', contribs);
+
+    const r = await fetch('/public-goods-check?' + params.toString());
+    const d = await r.json();
+
+    if (d.error) {{ el.innerHTML = `<span style="color:#ff4444">> ${{d.error}}</span>`; return; }}
+
+    const sc  = d.legitimacy_score || 0;
+    const col = sc >= 70 ? '#00ff41' : sc >= 40 ? '#ff9500' : '#ff4444';
+    const sybilCol = d.sybil_risk === 'LOW' ? '#00ff41' : d.sybil_risk === 'HIGH' ? '#ff4444' : '#ff9500';
+    const delivCol = d.delivery_confidence === 'HIGH' ? '#00ff41' : d.delivery_confidence === 'LOW' ? '#ff4444' : '#ff9500';
+
+    const flags     = (d.flags     || []).map(f => `<span style="color:#ff4444">⚠ ${{f}}</span>`).join('&nbsp;&nbsp;');
+    const strengths = (d.strengths || []).map(s => `<span style="color:#00ff41">✓ ${{s}}</span>`).join('&nbsp;&nbsp;');
+
+    el.innerHTML = `
+      <div style="margin-top:12px;padding:20px;border:1px solid #1a2a1a;background:#000">
+        <div style="color:var(--green);font-size:10px;letter-spacing:3px;margin-bottom:16px">
+          > PUBLIC GOODS LEGITIMACY REPORT${{d.project_name ? ' // ' + d.project_name.toUpperCase() : ''}}
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">
+          <div>
+            <div style="color:#444;font-size:10px;letter-spacing:1px">SCORE</div>
+            <div style="color:${{col}};font-size:28px;line-height:1">${{sc}}</div>
+            <div style="color:#333;font-size:10px">/100</div>
+          </div>
+          <div>
+            <div style="color:#444;font-size:10px;letter-spacing:1px">SYBIL RISK</div>
+            <div style="color:${{sybilCol}};font-size:16px;margin-top:4px">${{d.sybil_risk || '—'}}</div>
+          </div>
+          <div>
+            <div style="color:#444;font-size:10px;letter-spacing:1px">DELIVERY</div>
+            <div style="color:${{delivCol}};font-size:16px;margin-top:4px">${{d.delivery_confidence || '—'}}</div>
+          </div>
+          <div>
+            <div style="color:#444;font-size:10px;letter-spacing:1px">DATA</div>
+            <div style="color:#888;font-size:16px;margin-top:4px">${{d.data_richness || '—'}}</div>
+          </div>
+        </div>
+
+        ${{flags ? `<div style="margin-bottom:10px;font-size:11px">${{flags}}</div>` : ''}}
+        ${{strengths ? `<div style="margin-bottom:12px;font-size:11px">${{strengths}}</div>` : ''}}
+
+        <div style="color:#888;font-size:12px;line-height:1.8;border-left:2px solid #1a3a1a;padding-left:14px">
+          ${{d.assessment || 'No assessment available.'}}
+        </div>
+
+        <div style="margin-top:12px;font-size:10px;color:#333">
+          attestation: ${{d.attestation_uid ? d.attestation_uid.slice(0,16) + '...' : '—'}}
+        </div>
+      </div>`;
+
   }} catch(e) {{
     el.innerHTML = `<span style="color:#ff4444">> error: ${{e.message}}</span>`;
   }}

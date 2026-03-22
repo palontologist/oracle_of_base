@@ -16,6 +16,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from prophecy_engine  import FinancialProphet
 from oracle_skill     import skill_bp
+from public_goods_oracle import PublicGoodsOracle
 from frontend         import frontend_bp
 from social_prophet   import SocialProphet
 from trust_engine     import full_prophecy
@@ -41,6 +42,7 @@ RESOLVE_HOURS  = int(os.getenv("RESOLVE_AFTER_HOURS", "24"))
 # ── Oracles ───────────────────────────────────────────────────────────────────
 financial_oracle = FinancialProphet(AGENT_ID, PRIVATE_KEY)
 social_oracle    = SocialProphet(AGENT_ID, PRIVATE_KEY)
+public_goods_oracle = PublicGoodsOracle(AGENT_ID)
 
 # ── x402 Setup ────────────────────────────────────────────────────────────────
 facilitator = HTTPFacilitatorClientSync({"url": "https://facilitator.x402.org"})
@@ -78,6 +80,17 @@ routes = {
             "token":   "USDC"
         }],
         "description": "Full trust assessment — token + deployer + social signals combined",
+        "mimeType":    "application/json"
+    },
+    "GET /public-goods-check": {
+        "accepts": [{
+            "scheme":  "exact",
+            "price":   "$0.05",
+            "network": "eip155:8453",
+            "payTo":   WALLET_ADDRESS,
+            "token":   "USDC"
+        }],
+        "description": "Legitimacy analysis for public goods project team — wallet + GitHub + Farcaster + Gitcoin signals",
         "mimeType":    "application/json"
     },
     # ── Skill tiers — one-time purchase gives working agent code ──────────────
@@ -321,6 +334,102 @@ def moltbook_status():
                 os.getenv("MOLTBOOK_POST_VERDICTS", "CURSED").upper().split(",")
             ),
         })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/public-goods-check', methods=['GET'])
+def public_goods_check():
+    """
+    Legitimacy analysis for a public goods project team.
+    Designed for Octant, Gitcoin, and similar funding round evaluation.
+
+    Collects: on-chain wallet history, GitHub activity, Gitcoin Passport score,
+              Farcaster presence, contributor Sybil signals.
+
+    Venice AI reasons freely over all signals — no fixed rubric.
+
+    Query params:
+      wallet=      (required) team/project primary wallet
+      github=      (optional) GitHub username or org
+      handle=      (optional) Farcaster handle
+      contributors= (optional) comma-separated contributor wallet addresses
+      project=     (optional) project name for context
+
+    Cost: $0.05 USDC via x402
+    """
+    wallet  = request.args.get("wallet", "").strip()
+    github  = request.args.get("github", "").strip()
+    handle  = request.args.get("handle", "").strip()
+    project = request.args.get("project", "").strip()
+    contribs_raw = request.args.get("contributors", "").strip()
+
+    if not wallet:
+        return jsonify({"error": "Missing required param: wallet"}), 400
+    if not wallet.startswith("0x") or len(wallet) != 42:
+        return jsonify({"error": "Invalid wallet address"}), 400
+
+    contributor_wallets = [
+        w.strip() for w in contribs_raw.split(",")
+        if w.strip().startswith("0x")
+    ][:5] if contribs_raw else []
+
+    try:
+        result = public_goods_oracle.evaluate(
+            wallet               = wallet,
+            github               = github,
+            farcaster_handle     = handle,
+            contributor_wallets  = contributor_wallets,
+            project_name         = project,
+        )
+
+        # Save as a prediction for tracking
+        prediction_id = save_prediction(
+            agent_id            = AGENT_ID,
+            prediction_type     = "public_goods",
+            subject             = wallet,
+            verdict             = f"LEGITIMACY_{result['legitimacy_score']}",
+            score               = result["legitimacy_score"],
+            raw_data            = result,
+            attestation_uid     = result.get("attestation_uid", ""),
+            resolve_after_hours = 168,   # 7 days — give time for delivery signals
+        )
+
+        log.info(
+            f"Public goods eval | wallet={wallet[:10]} | "
+            f"score={result['legitimacy_score']} | "
+            f"sybil={result['sybil_risk']} | "
+            f"delivery={result['delivery_confidence']}"
+        )
+
+        return jsonify({
+            **result,
+            "prediction_id": prediction_id,
+        })
+
+    except Exception as e:
+        log.error(f"/public-goods-check error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/public-goods-feed', methods=['GET'])
+def public_goods_feed():
+    """Recent public goods evaluations — free, no payment required."""
+    limit = min(int(request.args.get("limit", 20)), 50)
+    try:
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT
+                        id, subject AS wallet, verdict, score,
+                        status, created_at, attestation_uid
+                    FROM predictions
+                    WHERE prediction_type = 'public_goods'
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                """, (limit,))
+                rows = [dict(r) for r in cur.fetchall()]
+        return jsonify({"evaluations": rows, "count": len(rows)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
