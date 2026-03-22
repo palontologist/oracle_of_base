@@ -74,7 +74,9 @@ def resolve_token_prediction(prediction: dict) -> tuple[str, float, dict]:
     token_address = prediction["subject"]
     verdict       = prediction["verdict"]
     orig_score    = prediction["score"]
-    raw           = json.loads(prediction["raw_data"] or "{}")
+    # Postgres JSONB returns a dict directly — json.loads only needed for plain TEXT
+    raw_data = prediction["raw_data"] or {}
+    raw = raw_data if isinstance(raw_data, dict) else json.loads(raw_data)
     orig_price    = float(raw.get("price_usd") or 0)
 
     current = fetch_token_data(token_address)
@@ -148,7 +150,8 @@ def resolve_social_prediction(prediction: dict) -> tuple[str, float, dict]:
     """
     handle  = prediction["subject"]
     verdict = prediction["verdict"]
-    raw     = json.loads(prediction["raw_data"] or "{}")
+    raw_data = prediction["raw_data"] or {}
+    raw = raw_data if isinstance(raw_data, dict) else json.loads(raw_data)
     orig_followers = int(raw.get("followers", 0))
 
     current = fetch_farcaster_data(handle)
