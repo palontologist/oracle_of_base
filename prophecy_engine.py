@@ -313,9 +313,10 @@ class FinancialProphet:
 
     def _call_venice(
         self,
-        token_signals:    dict,
-        deployer_signals: dict,
-        promoter_signals: dict,
+        token_signals:      dict,
+        deployer_signals:   dict,
+        promoter_signals:   dict,
+        lifecycle_context:  str = "",
     ) -> dict:
         """
         Pass ALL raw signals to Venice and let it reason like an analyst.
@@ -349,7 +350,7 @@ You score both brand new launches AND established tokens that are weeks, months,
 Read the signals like an experienced DeFi trader, not a checklist.
 
 ════ TOKEN LIFECYCLE CONTEXT ════
-{token_lifecycle_context}
+{lifecycle_context}
 ═════════════════════════════════
 
 Your read must match the lifecycle. A new token and a year-old token
@@ -583,7 +584,10 @@ Return ONLY this exact JSON:
 
         # ── Venice reasons across all signals ────────────────────────────────
         print("🧠 Venice analysing all signals...")
-        venice = self._call_venice(token_signals, deployer_signals, promoter_signals)
+        venice = self._call_venice(
+            token_signals, deployer_signals, promoter_signals,
+            lifecycle_context=token_lifecycle_context
+        )
 
         token_score    = venice['token_score']
         deployer_score = venice['deployer_score']

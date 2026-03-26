@@ -722,33 +722,73 @@ async function runCheck() {
   if (!raw) { setError('cresult', 'enter a token address, ENS name, or Farcaster handle'); return; }
 
   if (isAddr(raw) || isEns(raw)) {
-    // Address or ENS → trust check + ENS lookup in parallel
-    setLoading('cresult', 'consulting oracle + resolving identity');
+    // Token address or ENS → call /prophecy to score the actual token
+    setLoading('cresult', 'consulting oracle for token prophecy');
     try {
-      const [trust, ensR] = await Promise.all([
-        fetch('/trust-check').then(r => r.json()),
-        fetch('/ens-lookup?address=' + encodeURIComponent(raw)).then(r => r.json()).catch(() => ({}))
-      ]);
-      const sc  = parseFloat(trust.trust_score) || 0;
-      const col = trust.trusted ? '#00ff41' : '#ff9500';
-      const ensTag = ensR.ens_name
-        ? `<span style="color:#00ff41">${ensR.ens_name}</span>`
-        : `<span style="color:#2a2a2a">no ENS name registered</span>`;
+      const resp = await fetch('/prophecy?token=' + encodeURIComponent(raw));
+      const d = await resp.json();
+      if (d.error) { setError('cresult', d.error); return; }
+
+      const prophecy = d.prophecy || d;
+      const verdict  = (prophecy.verdict || '').split(' ')[0];
+      const score100 = Math.round((prophecy.score || 0) / 100);
+      const tok      = prophecy.details?.token || {};
+      const tscore   = prophecy.token_score   || 50;
+      const dscore   = prophecy.deployer_score || 20;
+      const pscore   = prophecy.promoter_score || 20;
+      const reason   = prophecy.venice_reason || (prophecy.details || {}).venice_reason || '';
+      const symbol   = tok.symbol || tok.name || '';
+      const liq      = tok.liquidity_usd || 0;
+      const ageDays  = tok.age_days;
+      const lifecycle = tok.lifecycle_stage || '';
+      const ensName  = prophecy.ens_name;
+
+      const vcol  = verdict === 'CURSED' ? '#ff4444' : verdict === 'BLESSED' ? '#00ff41' : '#ff9500';
+      const short = raw.slice(0,10) + '...' + raw.slice(-4);
+      const displayName = ensName
+        ? `<span style="color:#00ff41">${ensName}</span>`
+        : symbol
+        ? `<span style="color:#fff">${symbol}</span> <span style="color:#333">${short}</span>`
+        : `<span style="color:#aaa">${short}</span>`;
+
+      const ageLabel = ageDays
+        ? (ageDays < 1   ? (ageDays*24).toFixed(0)+'h old'
+        :  ageDays < 30  ? ageDays.toFixed(0)+'d old'
+        :  ageDays < 365 ? (ageDays/30).toFixed(0)+'mo old'
+        :                  (ageDays/365).toFixed(1)+'yr old')
+        : '';
+
       el.innerHTML = `
         <div class="result-box">
-          <div class="r-label">> ORACLE STATUS</div>
-          <div style="margin-bottom:12px;font-size:11px;color:#555">
-            ${raw.length > 20 ? raw.slice(0,10)+'...'+raw.slice(-4) : raw} &nbsp;→&nbsp; ${ensTag}
+          <div class="r-label">> TOKEN PROPHECY${symbol ? ' // $'+symbol.toUpperCase() : ''}</div>
+          <div style="margin-bottom:14px;font-size:11px;display:flex;align-items:center;gap:10px">
+            ${displayName}
+            ${ageLabel ? `<span style="color:#333;font-size:10px">${lifecycle} · ${ageLabel}</span>` : ''}
           </div>
-          <div class="result-grid g4">
-            <div><div class="rg-key">Trust score</div><div class="rg-val" style="color:${col}">${sc.toFixed(1)}%</div></div>
-            <div><div class="rg-key">Trusted</div><div class="rg-val" style="color:${col}">${trust.trusted ? 'YES' : 'NO'}</div></div>
-            <div><div class="rg-key">Resolved</div><div class="rg-val" style="color:#aaa">${trust.total_resolved || 0}</div></div>
-            <div><div class="rg-key">Agent ID</div><div class="rg-val" style="color:#aaa">34499</div></div>
+          <div class="result-grid g4" style="margin-bottom:12px">
+            <div>
+              <div class="rg-key">Verdict</div>
+              <div style="color:${vcol};font-size:20px;margin-top:4px;font-weight:900">${verdict}</div>
+            </div>
+            <div>
+              <div class="rg-key">Score</div>
+              <div class="rg-val" style="color:${vcol}">${score100}</div>
+            </div>
+            <div>
+              <div class="rg-key">Liquidity</div>
+              <div style="color:#aaa;font-size:14px;margin-top:4px">$${liq>1e6?(liq/1e6).toFixed(1)+'M':liq>1e3?(liq/1e3).toFixed(0)+'K':liq.toFixed(0)}</div>
+            </div>
+            <div>
+              <div class="rg-key">Lifecycle</div>
+              <div style="color:#666;font-size:11px;margin-top:6px">${lifecycle||'—'}</div>
+            </div>
           </div>
-          <div style="margin-top:10px;font-size:10px;color:#333">
-            Full token signal: GET /prophecy?token=${raw} ($0.01 USDC via x402)
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:12px">
+            <div><div class="rg-key">Token signal</div><div style="color:#00ff41;font-size:16px">${tscore}/100</div></div>
+            <div><div class="rg-key">Deployer</div><div style="color:${dscore>60?'#00ff41':dscore>30?'#ff9500':'#ff4444'};font-size:16px">${dscore}/100</div></div>
+            <div><div class="rg-key">Social</div><div style="color:${pscore>60?'#00ff41':pscore>30?'#ff9500':'#ff4444'};font-size:16px">${pscore}/100</div></div>
           </div>
+          ${reason ? `<div class="read-text">${reason}</div>` : ''}
         </div>`;
     } catch(e) { setError('cresult', e.message); }
 
