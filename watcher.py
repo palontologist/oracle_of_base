@@ -44,7 +44,9 @@ AGENT_ID      = os.getenv("AGENT_ID", "34499")
 PRIVATE_KEY   = os.getenv("AGENT_PRIVATE_KEY")
 RESOLVE_HOURS = int(os.getenv("RESOLVE_AFTER_HOURS", "24"))
 WATCH_INTERVAL        = int(os.getenv("WATCH_INTERVAL_SECONDS",    "600"))
-MAX_TOKEN_AGE_HOURS   = float(os.getenv("MAX_TOKEN_AGE_HOURS",     "2"))
+# Auto-watcher discovery filter — only watches NEW launches autonomously.
+# The /prophecy endpoint scores ANY token regardless of age.
+MAX_TOKEN_AGE_HOURS   = float(os.getenv("MAX_TOKEN_AGE_HOURS",     "48"))   # bumped: catch tokens up to 48h old
 MIN_LIQUIDITY_USD     = float(os.getenv("MIN_LIQUIDITY_USD",        "1000"))
 MAX_PREDICTIONS_CYCLE = int(os.getenv("MAX_PREDICTIONS_PER_CYCLE", "5"))
 MAX_PREDICTIONS_HOUR  = int(os.getenv("MAX_PREDICTIONS_PER_HOUR",  "20"))

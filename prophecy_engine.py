@@ -112,6 +112,13 @@ class FinancialProphet:
             "age_hours":          round(age_hours, 1),
             "age_days":           round(age_days, 1),
             "is_new":             age_hours < 48,
+            "lifecycle_stage": (
+                "brand_new"   if age_hours < 6
+                else "new"    if age_hours < 72
+                else "growing" if age_days < 30
+                else "maturing" if age_days < 180
+                else "established"
+            ),
 
             # Liquidity
             "liquidity_usd":      liquidity_usd,
@@ -337,22 +344,42 @@ class FinancialProphet:
             promoter_s = self._trim_for_venice(promoter_signals)
 
             prompt = f"""
-You are The Oracle of Base — an agentic AI analyst that assesses crypto token trust.
-You receive raw signals and reason like an experienced DeFi analyst, not a rules engine.
+You are The Oracle of Base — an agentic AI analyst scoring any Base chain token.
+You score both brand new launches AND established tokens that are weeks, months, or years old.
+Read the signals like an experienced DeFi trader, not a checklist.
 
-Your job: read the signals, spot the patterns, assign independent scores for each layer.
+════ TOKEN LIFECYCLE CONTEXT ════
+{token_lifecycle_context}
+═════════════════════════════════
+
+Your read must match the lifecycle. A new token and a year-old token
+need completely different lenses. Read the age_hours signal to calibrate.
 
 ════════════════════════════════════════════
 SIGNAL LAYER 1: TOKEN ON-CHAIN BEHAVIOUR
 ════════════════════════════════════════════
 {json.dumps(token_s, indent=2)}
 
-WHAT TO LOOK FOR:
-- Is buy_ratio_24h suspiciously high (>0.85)? Coordinated buying = pump incoming.
-- Is fdv_liquidity_ratio massive (>100)? Token is wildly overvalued vs real liquidity.
-- Does volume dry up quickly (decelerating trend)? Interest dying fast.
-- New token (<48h) with huge price spike then drop? Classic pump and dump shape.
-- Healthy token has: growing liquidity, balanced buy/sell ratio, sustainable volume.
+WHAT TO LOOK FOR — adapt by lifecycle:
+
+NEW TOKEN (<72h):
+  - Suspicious buy_ratio_24h (>0.85) = coordinated pump incoming
+  - Massive fdv_liquidity_ratio (>100) = valuation has no backing
+  - Price spike immediately then collapse = classic pump shape
+  - Very thin liquidity + high volume = wash trading
+
+ESTABLISHED TOKEN (weeks to months old):
+  - Is liquidity growing, stable, or bleeding? Trend matters more than absolute size
+  - Volume/liquidity ratio: healthy is 0.2-2x daily. <0.05 = ghost token, >5x = unusual activity
+  - Price trend over time: sustained drawdown is different from a dip — read it honestly
+  - Still has community? Check buy/sell balance and transaction count
+
+MATURE/OG TOKEN (months to years, like DEGEN, BRETT, etc):
+  - These tokens survived — deployer is proven, contract is audited
+  - Score is about current market health and risk, not rug potential
+  - Deep drawdown from ATH ≠ CURSED — it means MORTAL with context
+  - Active holders (1M+) + real utility = BLESSED even at low price
+  - Very low volume on high holder count = zombie token = MORTAL
 
 ════════════════════════════════════════════
 SIGNAL LAYER 2: DEPLOYER TRACK RECORD
@@ -360,35 +387,31 @@ SIGNAL LAYER 2: DEPLOYER TRACK RECORD
 {json.dumps(deployer_s, indent=2)}
 
 WHAT TO LOOK FOR:
-- Unknown deployer (no history) is NOT automatically bad — every deployer starts somewhere.
-  But unknown + suspicious token signals = treat harshly.
-- Known rugger (>50% failed tokens) = hard penalty regardless of how good the token looks.
-- Serial successful deployer = strong trust boost.
-- Look at the token_profiles: what happened to their previous tokens over time?
+- New token + unknown deployer + suspicious signals = weight this harshly
+- Established token: deployer pattern matters less — the token's own survival is the signal
+- Known rugger (>50% failed) = hard penalty for new tokens, context for old ones
+- Serial builder with thriving tokens = trust boost at any age
 
 ════════════════════════════════════════════
-SIGNAL LAYER 3: SOCIAL PROMOTION PATTERNS
+SIGNAL LAYER 3: SOCIAL PROMOTION
 ════════════════════════════════════════════
 {json.dumps(promoter_s, indent=2)}
 
 WHAT TO LOOK FOR:
-- Promoters with high follow_ratio (following >> followers) = bot accounts.
-- Multiple accounts posting similar text = coordinated shill campaign.
-- No social presence is NOT automatically bad for a new token — could be organic.
-- Real community: diverse bios, genuine engagement, varied follower counts.
-- Bot farm: identical bios, high follow ratios, low followers, repetitive cast text.
+- New token: bot farm promotion = strong CURSED signal
+- Established token: organic community that survived = strong positive signal
+- No social presence on a mature token = not a red flag, just a quiet community
+- Coordinated shill on any age token = suspicious
 
 ════════════════════════════════════════════
 SCORING
 ════════════════════════════════════════════
-Score each layer 0-100 based on what the signals actually show.
-Use your analyst judgment — do not apply mechanical rules.
+Score each layer 0-100. Use analyst judgment for the token's actual lifecycle stage.
 
-token_score:    How safe is this token based on on-chain behaviour?
-deployer_score: How trustworthy is this deployer based on their history?
-promoter_score: How organic and legitimate is the social promotion?
-
-Then give your overall verdict and one sentence of reasoning.
+For mature/OG tokens:
+  - CURSED means genuine danger right now (liquidity drain, team exit, exploit risk)
+  - MORTAL means hold with caution, risk is present but survivable
+  - BLESSED means healthy fundamentals, worth engaging with
 
 Return ONLY this exact JSON:
 {{
@@ -396,9 +419,51 @@ Return ONLY this exact JSON:
     "deployer_score": <0-100>,
     "promoter_score": <0-100>,
     "verdict":        "<BLESSED|MORTAL|CURSED>",
-    "reason":         "<one sentence analyst-style reasoning>"
+    "reason":         "<one sentence analyst-style reasoning — include lifecycle context>"
 }}
 """
+
+            # Build lifecycle context string
+            age_h = float(token_signals.get("age_hours", 0) or 0)
+            age_d = age_h / 24
+            liq   = float(token_signals.get("liquidity_usd", 0) or 0)
+            holders = token_signals.get("holder_count", 0) or 0
+
+            if age_h < 6:
+                token_lifecycle_context = (
+                    f"BRAND NEW TOKEN — {age_h:.1f} hours old. "
+                    f"Zero track record. Weight rug signals heavily. "
+                    f"Liquidity: ${liq:,.0f}."
+                )
+            elif age_h < 72:
+                token_lifecycle_context = (
+                    f"NEW TOKEN — {age_d:.1f} days old. "
+                    f"Early signals forming. Watch for pump-and-dump shape. "
+                    f"Liquidity: ${liq:,.0f}."
+                )
+            elif age_d < 30:
+                token_lifecycle_context = (
+                    f"GROWING TOKEN — {age_d:.0f} days old. "
+                    f"Survival past launch phase is positive. "
+                    f"Score current health and trajectory, not just rug risk. "
+                    f"Liquidity: ${liq:,.0f}."
+                )
+            elif age_d < 180:
+                token_lifecycle_context = (
+                    f"MATURING TOKEN — {age_d:.0f} days old ({age_d/30:.1f} months). "
+                    f"Has survived multiple market cycles. "
+                    f"Focus on sustained activity, community health, and current trend direction. "
+                    f"Liquidity: ${liq:,.0f}."
+                    + (f" Holders: {holders:,}." if holders else "")
+                )
+            else:
+                token_lifecycle_context = (
+                    f"ESTABLISHED/OG TOKEN — {age_d:.0f} days old ({age_d/365:.1f} years). "
+                    f"This token has a track record. Rug risk is low — score market health instead. "
+                    f"Deep drawdown from ATH is not CURSED — assess current fundamentals honestly. "
+                    f"Liquidity: ${liq:,.0f}."
+                    + (f" Holders: {holders:,}." if holders else "")
+                )
 
             payload = {
                 "model": os.getenv("VENICE_MODEL", "qwen3-5-9b"),
@@ -473,6 +538,42 @@ Return ONLY this exact JSON:
         # ── Collect raw signals ───────────────────────────────────────────────
         print("📊 Collecting on-chain signals...")
         token_signals = self.collect_token_signals(token_data)
+
+        # Enrich with Basescan holder count for established tokens
+        age_h = float(token_signals.get("age_hours", 0) or 0)
+        if age_h > 72:   # only worth fetching for non-brand-new tokens
+            try:
+                bscan = requests.get(
+                    f"https://api.basescan.org/api"
+                    f"?module=token&action=tokenholderlist"
+                    f"&contractaddress={token_address}&page=1&offset=1",
+                    timeout=6
+                )
+                # Basescan doesn't give total count directly but we can infer from
+                # the market data; use CoinGecko as fallback for well-known tokens
+                cg = requests.get(
+                    f"https://api.coingecko.com/api/v3/coins/base/contract/{token_address}",
+                    timeout=6
+                )
+                if cg.ok:
+                    cg_data = cg.json()
+                    token_signals["coingecko_id"]     = cg_data.get("id")
+                    token_signals["coingecko_name"]   = cg_data.get("name")
+                    token_signals["market_cap_rank"]  = cg_data.get("market_cap_rank")
+                    token_signals["developer_score"]  = cg_data.get("developer_score")
+                    token_signals["community_score"]  = cg_data.get("community_score")
+                    token_signals["twitter_followers"] = cg_data.get("community_data", {}).get("twitter_followers")
+                    dev = cg_data.get("developer_data", {})
+                    token_signals["github_commits_4w"] = dev.get("commit_count_4_weeks")
+                    token_signals["github_stars"]      = dev.get("stars")
+                    desc = cg_data.get("description", {}).get("en", "")
+                    token_signals["description"]       = desc[:200] if desc else None
+                    # Holder count from community data
+                    holders = cg_data.get("community_data", {}).get("reddit_subscribers")
+                    if holders:
+                        token_signals["reddit_subscribers"] = holders
+            except Exception:
+                pass   # enrichment is best-effort
 
         print("🕵️  Collecting deployer signals...")
         deployer_signals = self.collect_deployer_signals(token_address)

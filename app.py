@@ -20,6 +20,7 @@ from utils.ens        import enrich_address, resolve_ens
 from public_goods_oracle import PublicGoodsOracle
 from fund_manager        import get_fund_manager
 from edge_engine         import get_edge_engine
+from lit_skill           import get_lit_skill
 from sapience_trader     import get_sapience_trader
 from frontend         import frontend_bp
 from social_prophet   import SocialProphet
@@ -49,6 +50,7 @@ social_oracle    = SocialProphet(AGENT_ID, PRIVATE_KEY)
 public_goods_oracle = PublicGoodsOracle(AGENT_ID)
 fund               = get_fund_manager()
 edge               = get_edge_engine()
+lit_skill          = get_lit_skill()
 sapience           = get_sapience_trader()
 
 # ── x402 Setup ────────────────────────────────────────────────────────────────
@@ -141,10 +143,19 @@ routes = {
 
 @app.route('/prophecy', methods=['GET'])
 def get_financial_prophecy():
-    """Token safety score — on-chain metrics via DexScreener + Venice AI."""
+    """
+    Token safety score for ANY Base token — new launches or established OGs.
+    No age gate. Scores DEGEN, BRETT, new memes, everything on Base.
+    Venice adapts its lens based on token age/lifecycle automatically.
+    Cost: $0.01 USDC via x402.
+    """
     token_address = request.args.get('token')
     if not token_address:
         return jsonify({"error": "Missing 'token'"}), 400
+    # Accept ENS names
+    if not token_address.startswith("0x"):
+        from utils.ens import resolve_ens
+        token_address = resolve_ens(token_address)
     try:
         fate    = financial_oracle.consult_the_stars(token_address)
         if fate.get('score', 0) == 0:
@@ -450,6 +461,71 @@ def public_goods_check():
     except Exception as e:
         log.error(f"/public-goods-check error: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/lit/oracle-skill', methods=['GET'])
+def lit_oracle_skill_manifest():
+    """
+    Machine-readable Lit skill manifest.
+    Agents install this skill to get sealed Oracle verdicts from Chipotle TEE.
+    Knowledge moat: Venice prompts + calibration data + deployer flags stay sealed.
+    """
+    return jsonify(lit_skill.get_skill_manifest())
+
+
+@app.route('/lit/execute', methods=['POST'])
+def lit_execute():
+    """
+    Execute the Oracle dark knowledge skill inside Lit Chipotle TEE.
+
+    Body: { "token_address": "0x...", "caller_wallet": "0x..." }
+
+    Returns verdict + attestation. The scoring logic, API keys, and
+    calibration data never leave the TEE.
+    """
+    body          = request.get_json() or {}
+    token_address = body.get("token_address", "").strip()
+    caller_wallet = body.get("caller_wallet", "").strip()
+
+    if not token_address or not token_address.startswith("0x"):
+        return jsonify({"error": "token_address required (0x...)"}), 400
+
+    result = lit_skill.execute_skill(token_address, caller_wallet)
+    return jsonify(result)
+
+
+@app.route('/lit/verify', methods=['GET'])
+def lit_verify():
+    """
+    Verify a Lit TEE attestation for a past Oracle verdict.
+
+    Query params: token, verdict, score, timestamp, signature
+    """
+    token     = request.args.get("token", "")
+    verdict   = request.args.get("verdict", "")
+    score     = int(request.args.get("score", 0))
+    timestamp = int(request.args.get("timestamp", 0))
+    signature = request.args.get("signature", "")
+
+    valid = lit_skill.verify_attestation(token, verdict, score, timestamp, signature)
+    return jsonify({
+        "valid":         valid,
+        "token_address": token,
+        "verdict":       verdict,
+        "score":         score,
+        "timestamp":     timestamp,
+        "note": "Verified against Lit PKP — result came from inside Chipotle TEE" if valid
+                else "Verification failed — signature mismatch"
+    })
+
+
+@app.route('/lit/deploy', methods=['POST'])
+def lit_deploy():
+    """Admin: deploy the Lit Action to IPFS."""
+    cid = lit_skill.deploy_to_ipfs()
+    if cid:
+        return jsonify({"success": True, "cid": cid, "skill_url": f"{ORACLE_URL}/lit/oracle-skill"})
+    return jsonify({"success": False, "error": "Deploy failed"}), 500
 
 
 @app.route('/edge/forecasts', methods=['GET'])
