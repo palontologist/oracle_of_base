@@ -726,8 +726,15 @@ async function runCheck() {
     setLoading('cresult', 'consulting oracle for token prophecy');
     try {
       const resp = await fetch('/prophecy?token=' + encodeURIComponent(raw));
-      const d = await resp.json();
-      if (d.error) { setError('cresult', d.error); return; }
+      let d;
+      try { d = await resp.json(); } catch(je) {
+        setError('cresult', 'Oracle returned invalid response (token may need x402 payment)');
+        return;
+      }
+      if (!resp.ok || d.error) {
+        setError('cresult', d.error || 'Token not found on Base — check the address');
+        return;
+      }
 
       const prophecy = d.prophecy || d;
       const verdict  = (prophecy.verdict || '').split(' ')[0];

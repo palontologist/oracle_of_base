@@ -28,25 +28,80 @@ class FinancialProphet:
     # No scoring, no thresholds — just raw data for Venice to reason about.
 
     def fetch_token_data(self, token_address: str) -> dict | None:
-        """Fetch most liquid Base pair from DexScreener."""
-        url = f"https://api.dexscreener.com/latest/dex/tokens/{token_address}"
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        """
+        Fetch most liquid Base pair from DexScreener.
+        Tries the token endpoint first, then search fallback.
+        Handles both checksummed and lowercase addresses.
+        """
+        def _best_base_pair(pairs: list) -> dict | None:
+            if not pairs:
+                return None
+            base_pairs = [p for p in pairs if p.get('chainId') == 'base']
+            if not base_pairs:
+                return None
+            return sorted(
+                base_pairs,
+                key=lambda x: float(x.get('liquidity', {}).get('usd', 0) or 0),
+                reverse=True
+            )[0]
+
+        addr = token_address.strip()
+
+        # Try 1: /tokens/ endpoint (works for most tokens)
+        for attempt_addr in [addr, addr.lower()]:
+            try:
+                url = f"https://api.dexscreener.com/latest/dex/tokens/{attempt_addr}"
+                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=12) as r:
+                    data = json.loads(r.read().decode())
+                    result = _best_base_pair(data.get('pairs') or [])
+                    if result:
+                        return result
+            except Exception as e:
+                print(f"DexScreener token endpoint error ({attempt_addr[:10]}): {e}")
+
+        # Try 2: /search/ endpoint (catches tokens with different indexing)
         try:
+            url = f"https://api.dexscreener.com/latest/dex/search?q={addr}"
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=12) as r:
+                data = json.loads(r.read().decode())
+                result = _best_base_pair(data.get('pairs') or [])
+                if result:
+                    print(f"Found via DexScreener search fallback")
+                    return result
+        except Exception as e:
+            print(f"DexScreener search error: {e}")
+
+        # Try 3: GeckoTerminal as second source
+        try:
+            url = f"https://api.geckoterminal.com/api/v2/networks/base/tokens/{addr.lower()}"
+            req = urllib.request.Request(
+                url, headers={'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'}
+            )
             with urllib.request.urlopen(req, timeout=10) as r:
                 data = json.loads(r.read().decode())
-                if not data.get('pairs'):
-                    return None
-                base_pairs = [p for p in data['pairs'] if p['chainId'] == 'base']
-                if not base_pairs:
-                    return None
-                return sorted(
-                    base_pairs,
-                    key=lambda x: float(x.get('liquidity', {}).get('usd', 0) or 0),
-                    reverse=True
-                )[0]
+                attrs = data.get('data', {}).get('attributes', {})
+                if attrs:
+                    # Convert GeckoTerminal format to DexScreener-like shape
+                    return {
+                        'chainId':       'base',
+                        'baseToken':     {'address': addr, 'symbol': attrs.get('symbol',''), 'name': attrs.get('name','')},
+                        'priceUsd':      attrs.get('price_usd'),
+                        'liquidity':     {'usd': float(attrs.get('reserve_in_usd', 0) or 0)},
+                        'fdv':           float(attrs.get('fdv_usd', 0) or 0),
+                        'marketCap':     float(attrs.get('market_cap_usd', 0) or 0),
+                        'volume':        {'h24': float(attrs.get('volume_usd', {}).get('h24', 0) or 0)},
+                        'priceChange':   {'h24': float(attrs.get('price_change_percentage', {}).get('h24', 0) or 0)},
+                        'pairCreatedAt': 0,
+                        'txns':          {},
+                        '_source':       'geckoterminal',
+                    }
         except Exception as e:
-            print(f"DexScreener fetch error: {e}")
-            return None
+            print(f"GeckoTerminal fallback error: {e}")
+
+        print(f"Could not find token {addr[:10]}... on any source")
+        return None
 
     def collect_token_signals(self, token_data: dict) -> dict:
         """
@@ -424,48 +479,6 @@ Return ONLY this exact JSON:
 }}
 """
 
-            # Build lifecycle context string
-            age_h = float(token_signals.get("age_hours", 0) or 0)
-            age_d = age_h / 24
-            liq   = float(token_signals.get("liquidity_usd", 0) or 0)
-            holders = token_signals.get("holder_count", 0) or 0
-
-            if age_h < 6:
-                token_lifecycle_context = (
-                    f"BRAND NEW TOKEN — {age_h:.1f} hours old. "
-                    f"Zero track record. Weight rug signals heavily. "
-                    f"Liquidity: ${liq:,.0f}."
-                )
-            elif age_h < 72:
-                token_lifecycle_context = (
-                    f"NEW TOKEN — {age_d:.1f} days old. "
-                    f"Early signals forming. Watch for pump-and-dump shape. "
-                    f"Liquidity: ${liq:,.0f}."
-                )
-            elif age_d < 30:
-                token_lifecycle_context = (
-                    f"GROWING TOKEN — {age_d:.0f} days old. "
-                    f"Survival past launch phase is positive. "
-                    f"Score current health and trajectory, not just rug risk. "
-                    f"Liquidity: ${liq:,.0f}."
-                )
-            elif age_d < 180:
-                token_lifecycle_context = (
-                    f"MATURING TOKEN — {age_d:.0f} days old ({age_d/30:.1f} months). "
-                    f"Has survived multiple market cycles. "
-                    f"Focus on sustained activity, community health, and current trend direction. "
-                    f"Liquidity: ${liq:,.0f}."
-                    + (f" Holders: {holders:,}." if holders else "")
-                )
-            else:
-                token_lifecycle_context = (
-                    f"ESTABLISHED/OG TOKEN — {age_d:.0f} days old ({age_d/365:.1f} years). "
-                    f"This token has a track record. Rug risk is low — score market health instead. "
-                    f"Deep drawdown from ATH is not CURSED — assess current fundamentals honestly. "
-                    f"Liquidity: ${liq:,.0f}."
-                    + (f" Holders: {holders:,}." if holders else "")
-                )
-
             payload = {
                 "model": os.getenv("VENICE_MODEL", "qwen3-5-9b"),
                 "messages": [
@@ -583,10 +596,52 @@ Return ONLY this exact JSON:
         promoter_signals = self.collect_promoter_signals(token_signals['symbol'])
 
         # ── Venice reasons across all signals ────────────────────────────────
+        # ── Build lifecycle context here so it's in scope ───────────────────
+        _age_h   = float(token_signals.get("age_hours", 0) or 0)
+        _age_d   = _age_h / 24
+        _liq     = float(token_signals.get("liquidity_usd", 0) or 0)
+        _holders = token_signals.get("holder_count", 0) or 0
+
+        if _age_h < 6:
+            _lifecycle = (
+                f"BRAND NEW TOKEN — {_age_h:.1f} hours old. "
+                f"Zero track record. Weight rug signals heavily. "
+                f"Liquidity: ${_liq:,.0f}."
+            )
+        elif _age_h < 72:
+            _lifecycle = (
+                f"NEW TOKEN — {_age_d:.1f} days old. "
+                f"Early signals forming. Watch for pump-and-dump shape. "
+                f"Liquidity: ${_liq:,.0f}."
+            )
+        elif _age_d < 30:
+            _lifecycle = (
+                f"GROWING TOKEN — {_age_d:.0f} days old. "
+                f"Survival past launch phase is positive. "
+                f"Score current health and trajectory, not just rug risk. "
+                f"Liquidity: ${_liq:,.0f}."
+            )
+        elif _age_d < 180:
+            _lifecycle = (
+                f"MATURING TOKEN — {_age_d:.0f} days old ({_age_d/30:.1f} months). "
+                f"Has survived multiple market cycles. "
+                f"Focus on sustained activity, community health, and current trend direction. "
+                f"Liquidity: ${_liq:,.0f}."
+                + (f" Holders: {_holders:,}." if _holders else "")
+            )
+        else:
+            _lifecycle = (
+                f"ESTABLISHED/OG TOKEN — {_age_d:.0f} days old ({_age_d/365:.1f} years). "
+                f"This token has a track record. Rug risk is low — score market health instead. "
+                f"Deep drawdown from ATH is not CURSED — assess current fundamentals honestly. "
+                f"Liquidity: ${_liq:,.0f}."
+                + (f" Holders: {_holders:,}." if _holders else "")
+            )
+
         print("🧠 Venice analysing all signals...")
         venice = self._call_venice(
             token_signals, deployer_signals, promoter_signals,
-            lifecycle_context=token_lifecycle_context
+            lifecycle_context=_lifecycle
         )
 
         token_score    = venice['token_score']
