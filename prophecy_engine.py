@@ -479,39 +479,107 @@ Return ONLY this exact JSON:
 }}
 """
 
+            model = os.getenv("VENICE_MODEL", "qwen3-5-9b")
+
+            # qwen3-5-9b is a thinking model — it writes <think>...</think> before JSON.
+            # On a large token+deployer+social prompt the model can exhaust its budget
+            # thinking and produce no JSON. Two fixes:
+            #   1. Raise max_tokens to 2000 so there's budget for both thinking + output
+            #   2. Inject "budget_tokens" parameter to cap the think block at 800 tokens
+            is_thinking_model = any(x in model for x in ["qwen3", "qwen2.5", "deepseek-r1"])
+            max_tok = 2000 if is_thinking_model else 300
+
             payload = {
-                "model": os.getenv("VENICE_MODEL", "qwen3-5-9b"),
+                "model": model,
                 "messages": [
                     {
                         "role":    "system",
-                        "content": "You are an expert DeFi analyst. Output only valid JSON. No markdown, no preamble, no explanation outside the JSON."
+                        "content": "You are an expert DeFi analyst. Output only valid JSON. No markdown, no preamble, no explanation outside the JSON. Be concise."
                     },
                     {"role": "user", "content": prompt}
                 ],
                 "temperature": float(os.getenv("VENICE_TEMPERATURE", "0.3")),
-                "max_tokens":  200,  # scores + verdict only — keep response small and fast
+                "max_tokens":  int(os.getenv("VENICE_MAX_TOKENS", str(max_tok))),
             }
 
-            import time as _time
-            acquired = _venice_lock.acquire(timeout=300)  # wait up to 5 min
+            # Thinking model controls — cap think budget so output tokens are preserved
+            if is_thinking_model:
+                payload["venice_parameters"] = {"include_venice_system_prompt": False}
+                # budget_tokens caps the <think> block, leaving the rest for JSON output
+                payload["thinking"] = {"type": "enabled", "budget_tokens": 800}
+
+            acquired = _venice_lock.acquire(timeout=120)
             if not acquired:
-                raise TimeoutError("Venice lock wait timed out — too many queued predictions")
+                raise TimeoutError("Venice lock wait timed out")
+
+            last_error = None
+            result = None
+
             try:
-                response = requests.post(
-                    "https://api.venice.ai/api/v1/chat/completions",
-                    headers=headers, json=payload,
-                    timeout=int(os.getenv("VENICE_TIMEOUT", "60"))
-                )
-                response.raise_for_status()
-                result = response.json()['choices'][0]['message']['content']
+                # Retry up to 3 times — Venice occasionally returns empty body
+                for attempt in range(3):
+                    try:
+                        response = requests.post(
+                            "https://api.venice.ai/api/v1/chat/completions",
+                            headers=headers, json=payload,
+                            timeout=int(os.getenv("VENICE_TIMEOUT", "60"))
+                        )
+                        response.raise_for_status()
+
+                        # Guard against empty body
+                        raw_body = response.text.strip()
+                        if not raw_body:
+                            last_error = f"empty body (attempt {attempt+1})"
+                            print(f"⚠️  Venice {last_error}")
+                            time.sleep(3)
+                            continue
+
+                        data = response.json()
+                        content = data.get('choices', [{}])[0].get('message', {}).get('content', '')
+                        if not content or not content.strip():
+                            last_error = f"empty content (attempt {attempt+1})"
+                            print(f"⚠️  Venice {last_error}")
+                            time.sleep(3)
+                            continue
+
+                        result = content.strip()
+                        break  # success
+
+                    except Exception as e:
+                        last_error = str(e)
+                        print(f"⚠️  Venice attempt {attempt+1} failed: {e}")
+                        if attempt < 2:
+                            time.sleep(3)
             finally:
-                _venice_lock.release()
+                _venice_lock.release()  # ALWAYS release, even on exception
+
+            if not result:
+                raise Exception(last_error or "Venice returned no usable response after 3 attempts")
+
+            # Strip <think>...</think> blocks (qwen3, deepseek-r1 thinking models)
+            import re as _re
+            result_clean = _re.sub(r'<think>[\s\S]*?</think>', '', result, flags=_re.IGNORECASE).strip()
+            if result_clean:
+                result = result_clean
 
             # Strip markdown fences
             if "```json" in result:
                 result = result.split("```json")[1].split("```")[0].strip()
             elif "```" in result:
                 result = result.split("```")[1].split("```")[0].strip()
+
+            # Last resort: extract first JSON object if result still has noise
+            if result and not result.startswith("{"):
+                json_match = _re.search(r'\{[\s\S]+\}', result)
+                if json_match:
+                    result = json_match.group(0)
+
+            # Handle <think>...</think> tags from reasoning models
+            if "<think>" in result:
+                result = result.split("</think>")[-1].strip()
+
+            if not result:
+                raise Exception("Venice response was empty after stripping")
 
             parsed = json.loads(result)
             return {
@@ -523,6 +591,11 @@ Return ONLY this exact JSON:
             }
 
         except Exception as e:
+            # Make sure lock is released on any unexpected error
+            try:
+                _venice_lock.release()
+            except Exception:
+                pass
             print(f"Venice API error: {e}")
             return {
                 "token_score":    50,

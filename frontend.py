@@ -474,8 +474,13 @@ footer a:hover{{color:var(--g)}}
       <div class="fund-stat"><div class="fn" id="fs-open">—</div><div class="fl">Open positions</div></div>
       <div class="fund-stat"><div class="fn" id="fs-enabled">—</div><div class="fl">Status</div></div>
     </div>
-    <div id="fund-positions-wrap" style="margin-top:1px">
-      <div id="fund-positions-loading" style="padding:16px;color:var(--muted);font-size:11px">loading positions...</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--border);margin-top:1px">
+      <div style="background:var(--bg);padding:18px" id="fund-insights">
+        <div style="color:#333;font-size:11px">loading insights...</div>
+      </div>
+      <div id="fund-positions-wrap" style="background:var(--bg);padding:18px">
+        <div id="fund-positions-loading" style="color:var(--muted);font-size:11px">loading positions...</div>
+      </div>
     </div>
   </div>
 </section>
@@ -877,15 +882,16 @@ async function runPGCheck() {
 // ── FUND ─────────────────────────────────────────────────────────────────────
 async function loadFund() {
   try {
-    const [pnlR, posR] = await Promise.all([
+    const [pnlR, posR, insR] = await Promise.all([
       fetch('/fund/pnl').then(r => r.json()),
       fetch('/fund/positions?status=all').then(r => r.json()),
+      fetch('/fund/insights?days=7').then(r => r.json()).catch(() => ({})),
     ]);
 
     // Stats
     const p = pnlR;
     const enabled = p.fund_enabled;
-    document.getElementById('fs-balance').textContent = enabled ? '$' + (p.usdc_balance || 0).toFixed(2) : 'N/A';
+    document.getElementById('fs-balance').textContent = '$' + (p.usdc_balance || 0).toFixed(2);
     document.getElementById('fs-trades').textContent  = p.total_trades || 0;
     const wr = p.total_trades > 0 ? Math.round((p.winning_trades || 0) / p.total_trades * 100) : 0;
     document.getElementById('fs-winrate').textContent = p.total_trades > 0 ? wr + '%' : '—';
@@ -895,8 +901,27 @@ async function loadFund() {
     pnlEl.style.color  = pnl >= 0 ? '#00ff41' : '#ff4444';
     document.getElementById('fs-open').textContent    = p.open_positions || 0;
     const enEl = document.getElementById('fs-enabled');
-    enEl.textContent   = enabled ? 'LIVE' : 'PAPER';
+    enEl.textContent   = enabled ? 'LIVE' : 'PAPER MODE';
     enEl.style.color   = enabled ? '#00ff41' : '#ff9500';
+
+    // Insights — top tokens this week
+    if (insR.top_tokens && insR.top_tokens.length > 0) {
+      const topHtml = insR.top_tokens.slice(0,5).map(t => {
+        const p7 = parseFloat(t.total_pnl || 0);
+        const col = p7 >= 0 ? '#00ff41' : '#ff4444';
+        return `<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--border);font-size:11px">
+          <span style="color:#fff">${t.token_symbol || t.token_address.slice(0,8)+'...'}</span>
+          <span style="color:#555">${t.trades} trades</span>
+          <span style="color:${col}">${p7>=0?'+':''}$${p7.toFixed(4)}</span>
+        </div>`;
+      }).join('');
+      const insWrap = document.getElementById('fund-insights');
+      if (insWrap) insWrap.innerHTML = `
+        <div style="font-size:9px;letter-spacing:3px;color:var(--g);text-transform:uppercase;margin-bottom:10px">Top tokens (7d)</div>
+        ${topHtml}
+        ${insR.stats ? `<div style="margin-top:10px;font-size:10px;color:#555">7d P&L: <span style="color:${parseFloat(insR.stats.total_pnl||0)>=0?'#00ff41':'#ff4444'}">${(parseFloat(insR.stats.total_pnl||0)>=0?'+':'') + '$' + parseFloat(insR.stats.total_pnl||0).toFixed(4)}</span></div>` : ''}
+      `;
+    }
 
     // Positions table
     const positions = posR.positions || [];

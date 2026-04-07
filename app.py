@@ -554,6 +554,110 @@ def edge_markets():
     return jsonify({"markets": markets, "count": len(markets)})
 
 
+@app.route('/fund/insights', methods=['GET'])
+def fund_insights():
+    """
+    Fund performance insights — top tokens, weekly P&L, best/worst calls.
+    Free endpoint for transparency.
+    """
+    days = min(int(request.args.get("days", 7)), 90)
+    try:
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+
+                # Top profit tokens this period
+                cur.execute("""
+                    SELECT token_symbol, token_address,
+                           SUM(pnl_usdc)  AS total_pnl,
+                           AVG(pnl_pct)   AS avg_pct,
+                           COUNT(*)        AS trades,
+                           AVG(oracle_score) AS avg_score
+                    FROM fund_positions
+                    WHERE status = 'CLOSED'
+                      AND closed_at >= NOW() - INTERVAL '%s days'
+                    GROUP BY token_symbol, token_address
+                    ORDER BY total_pnl DESC
+                    LIMIT 10
+                """, (days,))
+                top_tokens = [dict(r) for r in cur.fetchall()]
+
+                # Weekly P&L by day
+                cur.execute("""
+                    SELECT DATE(closed_at) AS day,
+                           SUM(pnl_usdc)   AS day_pnl,
+                           COUNT(*)         AS trades,
+                           SUM(CASE WHEN pnl_usdc > 0 THEN 1 ELSE 0 END) AS wins
+                    FROM fund_positions
+                    WHERE status = 'CLOSED'
+                      AND closed_at >= NOW() - INTERVAL '%s days'
+                    GROUP BY DATE(closed_at)
+                    ORDER BY day DESC
+                """, (days,))
+                daily = [dict(r) for r in cur.fetchall()]
+
+                # Best single trade
+                cur.execute("""
+                    SELECT token_symbol, token_address, oracle_score,
+                           entry_usdc, pnl_usdc, pnl_pct, exit_reason,
+                           opened_at, closed_at
+                    FROM fund_positions
+                    WHERE status = 'CLOSED'
+                      AND closed_at >= NOW() - INTERVAL '%s days'
+                    ORDER BY pnl_pct DESC LIMIT 1
+                """, (days,))
+                best = dict(cur.fetchone() or {})
+
+                # Worst single trade
+                cur.execute("""
+                    SELECT token_symbol, token_address, oracle_score,
+                           entry_usdc, pnl_usdc, pnl_pct, exit_reason,
+                           opened_at, closed_at
+                    FROM fund_positions
+                    WHERE status = 'CLOSED'
+                      AND closed_at >= NOW() - INTERVAL '%s days'
+                    ORDER BY pnl_pct ASC LIMIT 1
+                """, (days,))
+                worst = dict(cur.fetchone() or {})
+
+                # Overall stats
+                cur.execute("""
+                    SELECT COUNT(*)   AS total_trades,
+                           SUM(CASE WHEN pnl_usdc > 0 THEN 1 ELSE 0 END) AS wins,
+                           SUM(pnl_usdc)  AS total_pnl,
+                           AVG(pnl_pct)   AS avg_pct,
+                           MAX(pnl_pct)   AS best_pct,
+                           MIN(pnl_pct)   AS worst_pct
+                    FROM fund_positions
+                    WHERE status = 'CLOSED'
+                      AND closed_at >= NOW() - INTERVAL '%s days'
+                """, (days,))
+                stats = dict(cur.fetchone() or {})
+
+        def fmt(rows):
+            if isinstance(rows, list):
+                return [{k: (float(v) if hasattr(v, '__float__') and not isinstance(v, (int, float, bool))
+                             else v.isoformat() if hasattr(v, 'isoformat') else v)
+                         for k, v in r.items()} for r in rows]
+            if isinstance(rows, dict):
+                return {k: (float(v) if hasattr(v, '__float__') and not isinstance(v, (int, float, bool))
+                            else v.isoformat() if hasattr(v, 'isoformat') else v)
+                        for k, v in rows.items()}
+            return rows
+
+        return jsonify({
+            "period_days":  days,
+            "stats":        fmt(stats),
+            "top_tokens":   fmt(top_tokens),
+            "daily_pnl":    fmt(daily),
+            "best_trade":   fmt(best),
+            "worst_trade":  fmt(worst),
+        })
+
+    except Exception as e:
+        log.error(f"/fund/insights: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/fund/positions', methods=['GET'])
 def fund_positions():
     """

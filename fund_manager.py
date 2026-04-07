@@ -393,15 +393,23 @@ class FundManager:
 
     # ── Main decision loop ────────────────────────────────────────────────────
 
+    def _paper_buy(self, token_address: str, usdc_amount: float, symbol: str) -> dict:
+        """Simulate a buy for paper trading mode."""
+        return {"success": True, "tx_hash": f"PAPER-{int(time.time())}", "paper": True}
+
+    def _paper_sell(self, token_address: str, token_amount: float) -> dict:
+        """Simulate a sell for paper trading mode."""
+        return {"success": True, "tx_hash": f"PAPER-{int(time.time())}", "paper": True}
+
     def consider_entry(self, token_address: str, oracle_score: int,
                        verdict: str, symbol: str = "") -> dict:
         """
         Called after each Oracle prediction.
         Decides whether to open a position based on score + risk limits.
+        Works in both live (FUND_ENABLED=true) and paper mode.
         """
-        if not self.enabled:
-            return {"action": "skipped", "reason": "fund_disabled"}
-
+        # Paper mode: track without real transactions
+        paper_mode = not self.enabled
         self._init_tables()
 
         # Only buy BLESSED tokens above score threshold
@@ -418,19 +426,23 @@ class FundManager:
         if self._already_holding(token_address):
             return {"action": "skip", "reason": "already_holding"}
 
-        # Check USDC balance
-        usdc_bal = self._get_usdc_balance()
-        if usdc_bal < MAX_POSITION_USDC:
-            return {"action": "skip", "reason": f"insufficient_usdc=${usdc_bal:.2f}"}
+        # Check USDC balance (skip for paper mode)
+        if not paper_mode:
+            usdc_bal = self._get_usdc_balance()
+            if usdc_bal < MAX_POSITION_USDC:
+                return {"action": "skip", "reason": f"insufficient_usdc=${usdc_bal:.2f}"}
 
         # Get entry price
         entry_price = self._get_token_price_usd(token_address)
         if not entry_price or entry_price <= 0:
             return {"action": "skip", "reason": "price_unavailable"}
 
-        # Execute buy
-        log.info(f"Opening position | {symbol} | score={oracle_score} | ${MAX_POSITION_USDC} USDC")
-        result = self._buy_token(token_address, MAX_POSITION_USDC)
+        # Execute buy (real or paper)
+        log.info(f"{'📝 PAPER' if paper_mode else '💰 LIVE'} entry | {symbol} | score={oracle_score} | ${MAX_POSITION_USDC}")
+        if paper_mode:
+            result = self._paper_buy(token_address, MAX_POSITION_USDC, symbol)
+        else:
+            result = self._buy_token(token_address, MAX_POSITION_USDC)
 
         if not result["success"]:
             return {"action": "failed", "error": result.get("error")}
@@ -506,8 +518,9 @@ class FundManager:
                 exit_reason = f"take_profit_{price_chg*100:.1f}pct"
 
             if exit_reason:
-                log.info(f"Exiting {symbol} | reason={exit_reason} | pnl=${current_val-entry_usdc:.4f}")
-                result = self._sell_token(token_addr, tokens_bought)
+                paper = str(pos[5] or "").startswith("PAPER") if len(pos) > 5 else True
+                log.info(f"{'📝 PAPER' if paper else '💰 LIVE'} exit | {symbol} | {exit_reason} | pnl=${current_val-entry_usdc:.4f}")
+                result = self._paper_sell(token_addr, tokens_bought) if (paper or not self.enabled)                          else self._sell_token(token_addr, tokens_bought)
 
                 pnl     = current_val - entry_usdc
                 pnl_pct = price_chg * 100
