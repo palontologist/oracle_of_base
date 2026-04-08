@@ -479,34 +479,37 @@ Return ONLY this exact JSON:
 }}
 """
 
-            model = os.getenv("VENICE_MODEL", "qwen3-5-9b")
+            model = os.getenv("VENICE_MODEL", "google.gemma-4-31b-it")
 
-            # qwen3-5-9b is a thinking model — it writes <think>...</think> before JSON.
-            # On a large token+deployer+social prompt the model can exhaust its budget
-            # thinking and produce no JSON. Two fixes:
-            #   1. Raise max_tokens to 2000 so there's budget for both thinking + output
-            #   2. Inject "budget_tokens" parameter to cap the think block at 800 tokens
+            # qwen3-5-9b is a thinking model that writes <think>...</think> before JSON.
+            # The thinking block can consume ALL tokens leaving nothing for JSON output.
+            # Fix: give it 8000 total tokens, cap thinking at 6000, leaving 2000 for JSON.
+            # Also use venice_parameters to disable system prompt injection that interferes.
             is_thinking_model = any(x in model for x in ["qwen3", "qwen2.5", "deepseek-r1"])
-            max_tok = 8000 if is_thinking_model else 2000
+            # Non-thinking models only need ~300 tokens for the 5-field JSON response
+            max_tok = int(os.getenv("VENICE_MAX_TOKENS", "8000" if is_thinking_model else "400"))
 
             payload = {
                 "model": model,
                 "messages": [
                     {
                         "role":    "system",
-                        "content": "You are an expert DeFi analyst. Output only valid JSON. No markdown, no preamble, no explanation outside the JSON. Be concise."
+                        "content": "You are an expert DeFi analyst. Output ONLY valid JSON with exactly these fields: token_score, deployer_score, promoter_score, verdict, reason. No markdown, no preamble, no explanation outside the JSON object."
                     },
                     {"role": "user", "content": prompt}
                 ],
-                "temperature": float(os.getenv("VENICE_TEMPERATURE", "0.3")),
-                "max_tokens":  int(os.getenv("VENICE_MAX_TOKENS", str(max_tok))),
+                "temperature": float(os.getenv("VENICE_TEMPERATURE", "0.2")),
+                "max_tokens":  max_tok,
             }
 
-            # Thinking model controls — cap think budget so output tokens are preserved
             if is_thinking_model:
+                # Disable Venice system prompt — it adds tokens that compete with thinking budget
                 payload["venice_parameters"] = {"include_venice_system_prompt": False}
-                # budget_tokens caps the <think> block, leaving the rest for JSON output
-                payload["thinking"] = {"type": "enabled", "budget_tokens": 6000}
+                # Cap thinking at 6000 tokens, preserving 2000 for actual JSON output
+                payload["thinking"] = {
+                    "type": "enabled",
+                    "budget_tokens": int(os.getenv("VENICE_THINK_BUDGET", "6000"))
+                }
 
             acquired = _venice_lock.acquire(timeout=120)
             if not acquired:

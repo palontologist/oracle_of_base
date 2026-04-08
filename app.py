@@ -21,6 +21,8 @@ from public_goods_oracle import PublicGoodsOracle
 from fund_manager        import get_fund_manager
 from edge_engine         import get_edge_engine
 from lit_skill           import get_lit_skill
+from agents.prophet      import get_prophet
+from agents.pheromone    import get_pheromone
 from sapience_trader     import get_sapience_trader
 from frontend         import frontend_bp
 from social_prophet   import SocialProphet
@@ -51,6 +53,8 @@ public_goods_oracle = PublicGoodsOracle(AGENT_ID)
 fund               = get_fund_manager()
 edge               = get_edge_engine()
 lit_skill          = get_lit_skill()
+prophet            = get_prophet()
+pheromone          = get_pheromone()
 sapience           = get_sapience_trader()
 
 # ── x402 Setup ────────────────────────────────────────────────────────────────
@@ -526,6 +530,96 @@ def lit_deploy():
     if cid:
         return jsonify({"success": True, "cid": cid, "skill_url": f"{ORACLE_URL}/lit/oracle-skill"})
     return jsonify({"success": False, "error": "Deploy failed"}), 500
+
+
+@app.route('/prophecy/v2', methods=['GET'])
+def prophecy_v2():
+    """
+    Multi-agent Oracle — PROPHET orchestrates SCARAB + SEER + PHEROMONE.
+    More accurate than v1 (lifecycle-aware, pheromone memory, anti-Goodhart weights).
+    Same x402 pricing. Works for any Base token regardless of age.
+    """
+    token_address = request.args.get('token', '').strip()
+    if not token_address or not token_address.startswith('0x'):
+        return jsonify({"error": "token address required (0x...)"}), 400
+    try:
+        fate = prophet.consult(token_address)
+        if fate.get('score', 0) == 0 and fate.get('error'):
+            return jsonify({"error": fate['error']}), 404
+
+        prediction_id = save_prediction(
+            agent_id            = AGENT_ID,
+            prediction_type     = "token",
+            subject             = token_address,
+            verdict             = fate.get('verdict', 'MORTAL'),
+            score               = fate.get('score', 5000),
+            token_score         = fate.get('token_score', 50),
+            deployer_score      = fate.get('deployer_score', 30),
+            promoter_score      = fate.get('promoter_score', 30),
+            details             = fate.get('details', {}),
+        )
+        return jsonify({"prediction_id": prediction_id, "prophecy": fate})
+    except Exception as e:
+        log.error(f"/prophecy/v2 error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/pheromone/top', methods=['GET'])
+def pheromone_top():
+    """Top pheromone-scored tokens — the Oracle's most trusted signals over time."""
+    limit = min(int(request.args.get('limit', 20)), 50)
+    return jsonify({
+        "top_tokens":  pheromone.top_tokens(limit),
+        "weight_dim":  pheromone.get_current_weight_dim(),
+        "description": "Tokens ranked by accumulated pheromone score (decays 20%/epoch, reinforced on correct resolution)",
+    })
+
+
+@app.route('/earnings', methods=['GET'])
+def earnings_dashboard():
+    """
+    Real Oracle earnings dashboard.
+    Shows x402 revenue, skill revenue, fund P&L, Sapience P&L vs Venice costs.
+    The Oracle's sustainability as an autonomous economic agent.
+    """
+    days = min(int(request.args.get('days', 30)), 90)
+    try:
+        from edge_engine import get_edge_engine
+        report = get_edge_engine().get_sustainability_report(days)
+
+        # Add live x402 revenue from predictions table
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT COUNT(*) as total,
+                           COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '24 hours') as last_24h,
+                           COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days')  as last_7d
+                    FROM predictions
+                """)
+                row = cur.fetchone()
+                report["predictions"] = {
+                    "total":   row[0] if row else 0,
+                    "last_24h": row[1] if row else 0,
+                    "last_7d":  row[2] if row else 0,
+                }
+
+                # Revenue by source (x402 headers stored in predictions)
+                cur.execute("""
+                    SELECT
+                        SUM(score::float / 10000 * 0.01) AS est_x402_revenue
+                    FROM predictions
+                    WHERE created_at >= NOW() - INTERVAL '%s days'
+                """, (days,))
+                rev_row = cur.fetchone()
+                report["estimated_x402_revenue_usd"] = round(float(rev_row[0] or 0), 4)
+
+        report["agent_wallet"]    = WALLET_ADDRESS
+        report["fund_enabled"]    = os.getenv("FUND_ENABLED", "false").lower() == "true"
+        report["sapience_enabled"] = os.getenv("SAPIENCE_ENABLED", "false").lower() == "true"
+        return jsonify(report)
+    except Exception as e:
+        log.error(f"/earnings: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/edge/forecasts', methods=['GET'])
@@ -1009,6 +1103,15 @@ def start_resolution_scheduler():
                 fund.run_exit_checks()
             except Exception as e:
                 log.warning(f"Fund exit check error: {e}")
+            # Run pheromone decay epoch every 24h
+            try:
+                import datetime as _dt
+                _now = _dt.datetime.utcnow()
+                if _now.hour == 0 and _now.minute < 6:  # ~midnight UTC
+                    result = pheromone.run_decay_epoch()
+                    log.info(f"Pheromone epoch: {result}")
+            except Exception as e:
+                log.warning(f"Pheromone decay error: {e}")
             time.sleep(interval)
 
     t = threading.Thread(target=_loop, daemon=True, name="resolution-engine")
