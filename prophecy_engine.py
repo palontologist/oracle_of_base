@@ -487,7 +487,7 @@ Return ONLY this exact JSON:
             #   1. Raise max_tokens to 2000 so there's budget for both thinking + output
             #   2. Inject "budget_tokens" parameter to cap the think block at 800 tokens
             is_thinking_model = any(x in model for x in ["qwen3", "qwen2.5", "deepseek-r1"])
-            max_tok = 2000 if is_thinking_model else 300
+            max_tok = 8000 if is_thinking_model else 2000
 
             payload = {
                 "model": model,
@@ -506,7 +506,7 @@ Return ONLY this exact JSON:
             if is_thinking_model:
                 payload["venice_parameters"] = {"include_venice_system_prompt": False}
                 # budget_tokens caps the <think> block, leaving the rest for JSON output
-                payload["thinking"] = {"type": "enabled", "budget_tokens": 800}
+                payload["thinking"] = {"type": "enabled", "budget_tokens": 6000}
 
             acquired = _venice_lock.acquire(timeout=120)
             if not acquired:
