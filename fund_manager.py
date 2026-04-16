@@ -22,6 +22,7 @@ import time
 import logging
 import requests
 from decimal import Decimal
+from mandate_integration import get_mandate_client
 
 log = logging.getLogger("fund_manager")
 
@@ -29,6 +30,9 @@ log = logging.getLogger("fund_manager")
 BASE_RPC_URL        = os.getenv("BASE_RPC_URL", "https://mainnet.base.org")
 PRIVATE_KEY         = os.getenv("AGENT_PRIVATE_KEY", "")
 WALLET_ADDRESS      = "0x1EA37E2Fb76Aa396072204C90fcEF88093CEb920"
+
+# Mandate transaction intelligence
+MANDATE_ENABLED = os.getenv("MANDATE_ENABLED", "false").lower() == "true"
 
 MAX_POSITION_USDC   = float(os.getenv("MAX_POSITION_USDC",   "2.0"))   # max $ per trade
 MAX_OPEN_POSITIONS  = int(os.getenv("MAX_OPEN_POSITIONS",    "3"))     # max concurrent holds
@@ -294,6 +298,22 @@ class FundManager:
             approve_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
             w3.eth.wait_for_transaction_receipt(approve_hash, timeout=60)
             log.info(f"USDC approved | tx={approve_hash.hex()[:16]}...")
+
+            # Mandate transaction intelligence - evaluate before swap
+            if MANDATE_ENABLED:
+                mandate = get_mandate_client()
+                eval_result = mandate.evaluate_transaction(
+                    from_address=WALLET_ADDRESS,
+                    to_address=router_addr,
+                    amount=usdc_amount,
+                    token="USDC",
+                    network="eip155:8453",
+                    reason=f"Buy {token_address[:10]}... via Uniswap V3",
+                )
+                if not eval_result.get("approved"):
+                    log.warning(f"Mandate blocked buy | token={token_address[:10]}... | reason={eval_result.get('reason')}")
+                    return {"success": False, "error": f"Mandate blocked: {eval_result.get('reason')}", "mandate_eval": eval_result}
+                log.info(f"Mandate approved | action={eval_result.get('action')} | policy={eval_result.get('policy_matched')}")
 
             # Swap USDC → token (fee tier 3000 = 0.3%)
             swap_tx = self.router.functions.exactInputSingle({

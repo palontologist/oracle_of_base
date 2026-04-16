@@ -1,0 +1,25 @@
+{
+  "$schema": "https://openapi.vercel.com/schemas/vercel.json",
+  "builds": [
+    {
+      "src": "app.py",
+      "use": "@vercel/python",
+      "config": {
+        "runtime": "python3.11",
+        "entrypoint": "app.py"
+      }
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "app.py"
+    }
+  ],
+  "env": {
+    "FLASK_APP": "app.py"
+  },
+  "python": {
+    "version": "3.11"
+  }
+}
